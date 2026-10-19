@@ -1,60 +1,33 @@
-import { NextRequest, NextResponse } from 'next/server';
-import supabase from '@/lib/supabase';
+import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
+import supabase from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { loginSchema } from '@/lib/validation/auth';
+import { rateLimit, clientIp } from '@/lib/rate-limit';
+import { signSession, SESSION_COOKIE, sessionCookieOptions } from '@/lib/auth/session';
+import { HttpError } from '@/lib/api/errors';
 
-export async function POST(request: NextRequest) {
-  try {
-    const { identifier, password } = await request.json();
+// Compared against when the account does not exist, so timing doesn't reveal which accounts exist.
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 12);
 
-    if (!identifier || !password) {
-      return NextResponse.json(
-        { error: 'Email/phone and password are required' },
-        { status: 400 }
-      );
-    }
+export const POST = route(async (req) => {
+  rateLimit(`login:${clientIp(req)}`, 10, 15 * 60_000);
+  const { identifier, password } = await parseJson(req, loginSchema);
 
-    // Check if identifier is email or phone
-    const isEmail = identifier.includes('@');
-    
-    let query = supabase.from('users').select('*');
-    
-    if (isEmail) {
-      query = query.eq('email', identifier);
-    } else {
-      query = query.eq('phone_number', identifier);
-    }
-    
-    const { data: users, error } = await query.single();
-    
-    if (error || !users) {
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 401 }
-      );
-    }
+  const column = identifier.includes('@') ? 'email' : 'phone_number';
+  const value = column === 'email' ? identifier.toLowerCase() : identifier;
+  const { data: user } = await supabase
+    .from('users')
+    .select('id, name, email, phone_number, role, password, created_at')
+    .eq(column, value)
+    .maybeSingle();
 
-    const isValidPassword = await bcrypt.compare(password, users.password);
+  const ok = await bcrypt.compare(password, (user?.password as string | undefined) ?? DUMMY_HASH);
+  if (!user || !ok) throw new HttpError(401, 'Invalid credentials');
 
-    if (!isValidPassword) {
-      return NextResponse.json(
-        { error: 'Invalid password' },
-        { status: 401 }
-      );
-    }
-
-    // Remove password from response
-    const { password: _, ...userWithoutPassword } = users;
-
-    return NextResponse.json({
-      message: 'Login successful',
-      user: userWithoutPassword
-    });
-
-  } catch (error) {
-    console.error('Login error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
-  }
-}
+  const { password: _pw, ...safe } = user as Record<string, unknown>;
+  const token = await signSession({ userId: String(user.id), role: user.role as 'farmer' | 'buyer' });
+  const res = NextResponse.json({ message: 'Login successful', user: safe });
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions);
+  return res;
+});

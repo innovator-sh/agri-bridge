@@ -1,75 +1,64 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import supabase from '@/lib/supabase';
+import { route } from '@/lib/api/handler';
+import { HttpError } from '@/lib/api/errors';
+import { requireUser } from '@/lib/auth/require';
+import { paginationSchema } from '@/lib/validation/orders';
 
-export async function GET(request: NextRequest) {
-  try {
-    // Get all farmers (suppliers) with their product counts and stats
-    const { data: suppliers, error } = await supabase
-      .from('users')
-      .select(`
-        id,
-        name,
-        email,
-        phone_number,
-        created_at
-      `)
-      .eq('role', 'farmer')
-      .order('name', { ascending: true });
+type Row = Record<string, any>;
 
-    if (error) {
-      console.error('Suppliers fetch error:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch suppliers' },
-        { status: 500 }
-      );
-    }
+// GET - paginated farmers with product stats (batched: 2 queries total, no email)
+export const GET = route(async (req) => {
+  await requireUser();
+  const { limit, offset } = paginationSchema.parse(Object.fromEntries(new URL(req.url).searchParams));
 
-    // Get product counts and stats for each supplier
-    const suppliersWithStats = await Promise.all(
-      suppliers.map(async (supplier) => {
-        // Get product count
-        const { count: productCount } = await supabase
-          .from('products')
-          .select('*', { count: 'exact', head: true })
-          .eq('seller_id', supplier.id)
-          .eq('status', 'active');
+  const { data, count, error } = await supabase
+    .from('users')
+    .select('id, name, phone_number, created_at', { count: 'exact' })
+    .eq('role', 'farmer')
+    .order('name', { ascending: true })
+    .range(offset, offset + limit - 1);
 
-        // Get products for calculating stats
-        const { data: products } = await supabase
-          .from('products')
-          .select('price_single, quantity, category')
-          .eq('seller_id', supplier.id)
-          .eq('status', 'active');
-
-        // Calculate stats
-        const totalStock = products?.reduce((sum, p) => sum + p.quantity, 0) || 0;
-        const avgPrice = (products && products.length > 0)
-          ? Math.round(products.reduce((sum, p) => sum + p.price_single, 0) / products.length)
-          : 0;
-        
-        // Get unique categories
-        const categories = [...new Set(products?.map(p => p.category) || [])];
-
-        return {
-          ...supplier,
-          productCount: productCount || 0,
-          totalStock,
-          avgPrice,
-          categories,
-          joinedDate: new Date(supplier.created_at).toLocaleDateString()
-        };
-      })
-    );
-
-    return NextResponse.json({
-      suppliers: suppliersWithStats
-    });
-
-  } catch (error) {
-    console.error('Suppliers API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (error) {
+    console.error('[suppliers] fetch failed', error);
+    throw new HttpError(500, 'Failed to fetch suppliers');
   }
-}
+
+  const farmers = (data ?? []) as unknown as Row[];
+  const byFarmer = new Map<number, Row[]>();
+
+  if (farmers.length > 0) {
+    const { data: products, error: pErr } = await supabase
+      .from('products')
+      .select('seller_id, price_single, quantity, category')
+      .in('seller_id', farmers.map((f) => f.id))
+      .eq('status', 'active');
+    if (pErr) {
+      console.error('[suppliers] products fetch failed', pErr);
+      throw new HttpError(500, 'Failed to fetch suppliers');
+    }
+    for (const p of (products ?? []) as unknown as Row[]) {
+      const list = byFarmer.get(p.seller_id) ?? [];
+      list.push(p);
+      byFarmer.set(p.seller_id, list);
+    }
+  }
+
+  const suppliers = farmers.map((f) => {
+    const products = byFarmer.get(f.id) ?? [];
+    const totalStock = products.reduce((s, p) => s + (p.quantity || 0), 0);
+    const avgPrice = products.length
+      ? Math.round(products.reduce((s, p) => s + Number(p.price_single || 0), 0) / products.length)
+      : 0;
+    return {
+      ...f,
+      productCount: products.length,
+      totalStock,
+      avgPrice,
+      categories: [...new Set(products.map((p) => p.category))],
+      joinedDate: new Date(f.created_at).toLocaleDateString(),
+    };
+  });
+
+  return NextResponse.json({ suppliers, total: count ?? 0, limit, offset });
+});

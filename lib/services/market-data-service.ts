@@ -39,14 +39,12 @@ export class MarketDataService implements PricePredictionService {
    */
   async searchCommodityPrices(productName: string, state?: string): Promise<PricePrediction | null> {
     try {
-      console.log('Searching for commodity prices:', productName);
       
       // Check cache first
       const cacheKey = this.generateCacheKey(productName, state);
       const cachedEntry = this.cache.get(cacheKey);
       
       if (cachedEntry && this.isCacheValid(cachedEntry)) {
-        console.log('Returning cached result for:', productName);
         return cachedEntry.data;
       }
 
@@ -59,7 +57,6 @@ export class MarketDataService implements PricePredictionService {
         params.append('state', state);
       }
 
-      console.log('Making API request for:', productName);
 
       // Make request to our API route
       const response = await fetch(`/api/market-data?${params.toString()}`, {
@@ -77,7 +74,6 @@ export class MarketDataService implements PricePredictionService {
       const data = await response.json();
       const prediction = data.prediction;
 
-      console.log('API response received:', prediction ? 'Data found' : 'No data');
 
       if (prediction) {
         // Cache the result

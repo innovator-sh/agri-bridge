@@ -18,19 +18,21 @@ interface PaymentPortalProps {
   isOpen: boolean;
   onClose: () => void;
   cartItems: CartItem[];
-  userId: number;
   onPaymentSuccess: () => void;
+  /** Called when the cart changed but the portal stays open (partial failure). */
+  onCartChanged?: () => void;
 }
 
 export default function PaymentPortal({ 
   isOpen, 
   onClose, 
   cartItems, 
-  userId, 
-  onPaymentSuccess 
+  onPaymentSuccess,
+  onCartChanged
 }: PaymentPortalProps) {
   const [step, setStep] = useState(1); // 1: Details, 2: Payment, 3: Success
   const [loading, setLoading] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
@@ -72,50 +74,68 @@ export default function PaymentPortal({
 
   const handlePayment = async () => {
     setLoading(true);
-    
+    setPaymentError('');
+
     try {
       // Process payment (simulate success for now)
       await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Create orders for each item
-      const orderResults = [];
-      
+
+      // Create one order per cart item, sequentially. The server computes prices
+      // and identifies the buyer from the session.
+      const placedProductIds: number[] = [];
+      let failure = '';
+
       for (const item of cartItems) {
         try {
           const response = await fetch('/api/orders', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              buyerId: userId,
-              sellerId: item.seller_id,
               productId: item.id,
               quantity: item.cart_quantity,
-              unitPrice: item.cart_quantity >= 10 ? item.price_multiple : item.price_single,
-              totalPrice: calculateItemTotal(item),
               deliveryAddress: `${formData.address}, ${formData.city} - ${formData.pincode}`,
               notes: formData.notes
             })
           });
 
-          const result = await response.json();
-          console.log('Order result:', result);
-          orderResults.push({ success: response.ok, result });
+          if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            const reason = typeof result?.error === 'string' ? result.error : `status ${response.status}`;
+            failure = `Could not place the order for "${item.name}" (${reason}).`;
+            break;
+          }
+          placedProductIds.push(item.id);
         } catch (error) {
           console.error('Order creation error:', error);
-          orderResults.push({ success: false, error });
+          failure = `Could not place the order for "${item.name}". Please check your connection and try again.`;
+          break;
         }
       }
 
-      console.log('All order results:', orderResults);
+      if (failure) {
+        // Remove items that were already ordered so they are not ordered twice on retry
+        for (const productId of placedProductIds) {
+          try {
+            await fetch('/api/cart', {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ productId })
+            });
+          } catch (error) {
+            console.error('Cart update error:', error);
+          }
+        }
+        if (placedProductIds.length > 0) {
+          failure += ` ${placedProductIds.length} other order(s) were placed successfully and removed from your cart.`;
+          onCartChanged?.();
+        }
+        setPaymentError(failure);
+        return;
+      }
 
-      // For now, always proceed to success (simulate all payments work)
-      // Clear cart
+      // All orders placed: clear cart
       try {
-        await fetch('/api/cart/clear', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId })
-        });
+        await fetch('/api/cart/clear', { method: 'POST' });
       } catch (error) {
         console.error('Cart clear error:', error);
       }
@@ -125,9 +145,7 @@ export default function PaymentPortal({
 
     } catch (error) {
       console.error('Payment error:', error);
-      // For now, even if there are errors, show success
-      setStep(3);
-      onPaymentSuccess();
+      setPaymentError('Payment failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -336,6 +354,12 @@ export default function PaymentPortal({
                   Your order will be processed immediately after payment confirmation.
                 </p>
               </div>
+
+              {paymentError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm" role="alert">
+                  {paymentError}
+                </div>
+              )}
 
               <div className="flex gap-4">
                 <button

@@ -78,20 +78,15 @@ export default function Dashboard({ userType, userId, products = [], orders = []
       
       if (userLocation) {
         url += `?lat=${userLocation.latitude}&lon=${userLocation.longitude}`;
-        console.log('Fetching weather for coordinates:', userLocation.latitude, userLocation.longitude);
       } else {
-        console.log('No user location available, using default location');
       }
 
-      console.log('Weather API URL:', url);
       const response = await fetch(url);
       const data = await response.json();
       
-      console.log('Weather API response:', data);
       
       if (data.success) {
         setWeather(data.weather);
-        console.log('Weather data loaded:', data.weather.location, data.weather.region, data.weather.isDemo ? '(Demo)' : '(Real)');
       }
     } catch (error) {
       console.error('Error fetching weather:', error);

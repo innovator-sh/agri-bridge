@@ -1,36 +1,26 @@
-import { createClient } from '@supabase/supabase-js';
+import 'server-only';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { env } from '@/lib/env';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+// No generated DB types yet, so the client is intentionally loosely typed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Db = SupabaseClient<any, 'public', any>;
 
-// Debug logging
-console.log('Supabase URL:', supabaseUrl);
-console.log('Service Key exists:', !!supabaseServiceKey);
-console.log('Using service role key:', process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Yes' : 'No (fallback to anon)');
+let client: Db | undefined;
 
-if (!supabaseUrl) {
-  throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL environment variable');
-}
-
-if (!supabaseServiceKey) {
-  throw new Error('Missing both SUPABASE_SERVICE_ROLE_KEY and NEXT_PUBLIC_SUPABASE_ANON_KEY environment variables');
-}
-
-// Create a Supabase client with service role key for server-side operations
-export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
+/** Service-role client. Server only: RLS is bypassed, so callers must authorise first. */
+export function getSupabase(): Db {
+  if (!client) {
+    const e = env();
+    client = createClient(e.NEXT_PUBLIC_SUPABASE_URL, e.SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
   }
-});
-
-// Create a client-side Supabase client for public operations
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-if (!supabaseAnonKey) {
-  throw new Error('Missing NEXT_PUBLIC_SUPABASE_ANON_KEY environment variable');
+  return client;
 }
 
-export const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = new Proxy({} as Db, {
+  get: (_t, prop) => Reflect.get(getSupabase(), prop),
+});
 
 export default supabase;

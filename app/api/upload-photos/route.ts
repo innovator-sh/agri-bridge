@@ -1,43 +1,47 @@
-import { NextRequest, NextResponse } from 'next/server';
-import supabase from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError, badRequest, forbidden, notFound } from '@/lib/api/errors';
+import { requireRole, uid } from '@/lib/auth/require';
+import { ownedPhotoPath, photoUrlsSchema } from '@/lib/validation/uploads';
 
-export async function POST(request: NextRequest) {
-  try {
-    const { productId, photoUrls } = await request.json();
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
 
-    if (!productId || !photoUrls || !Array.isArray(photoUrls)) {
-      return NextResponse.json(
-        { error: 'Product ID and photo URLs are required' },
-        { status: 400 }
-      );
-    }
+export const POST = route(async (req) => {
+  const session = await requireRole('farmer');
+  const { productId, photoUrls } = await parseJson(req, photoUrlsSchema);
 
-    // Update product with photo URLs
-    const { data, error } = await supabase
-      .from('products')
-      .update({ photos: photoUrls })
-      .eq('id', productId)
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Database update error:', error);
-      return NextResponse.json(
-        { error: 'Failed to update product photos' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      product: data
-    });
-
-  } catch (error) {
-    console.error('Upload photos API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const { data: existing, error: lookupError } = await supabase
+    .from('products')
+    .select('seller_id, photos')
+    .eq('id', productId)
+    .maybeSingle();
+  if (lookupError) {
+    console.error('Photos product lookup error:', lookupError);
+    throw new HttpError(500, 'Failed to update product photos');
   }
-}
+  if (!existing) throw notFound('Product');
+  if (Number(existing.seller_id) !== uid(session)) throw forbidden();
+
+  // Every URL must live in our bucket under one of the session user's folders (or already be on the product).
+  const current = (existing.photos as string[] | null) ?? [];
+  if (photoUrls.some((u) => !current.includes(u) && !ownedPhotoPath(u, uid(session)))) {
+    throw badRequest('Invalid photo URL');
+  }
+
+  const { data, error } = await supabase
+    .from('products')
+    .update({ photos: photoUrls })
+    .eq('id', productId)
+    .eq('seller_id', uid(session))
+    .select()
+    .single();
+  if (error) {
+    console.error('Database update error:', error);
+    throw new HttpError(500, 'Failed to update product photos');
+  }
+
+  return NextResponse.json({ success: true, product: data });
+});

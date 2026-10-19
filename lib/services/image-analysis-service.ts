@@ -1,5 +1,3 @@
-import { ML_API_CONFIG, getApiUrl, isMLApiConfigured } from '../config/ml-api';
-
 export interface PredictionResponse {
   filename: string;
   predicted_class: string;
@@ -8,61 +6,60 @@ export interface PredictionResponse {
   message: string;
 }
 
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 35000; // slightly above the server-side 30s limit
+
+// Sends the image to our own authenticated API route; the ML service URL never reaches the browser.
 export const analyzeCropImage = async (file: File): Promise<PredictionResponse | null> => {
   // Validate input
   if (!file || !(file instanceof File)) {
     console.error("Invalid file provided for analysis");
     return null;
   }
-
-  // Check if ML API is configured
-  if (!isMLApiConfigured()) {
-    console.warn("ML API not configured properly");
-    return null;
+  if (!file.type.startsWith('image/')) {
+    throw new Error("Only image files can be analyzed");
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    throw new Error("Image must be 5 MB or smaller");
   }
 
   const formData = new FormData();
   formData.append("file", file);
 
   try {
-    // Add timeout to prevent hanging requests
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), ML_API_CONFIG.TIMEOUT);
-
-    const response = await fetch(getApiUrl(), {
+    const response = await fetch('/api/quality-analysis', {
       method: "POST",
       body: formData,
-      headers: ML_API_CONFIG.HEADERS,
-      signal: controller.signal,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
-      // Handle specific error cases
-      if (response.status === 404) {
-        throw new Error("ML service endpoint not found - the prediction service may not be running");
-      } else if (response.status === 500) {
-        throw new Error("ML service internal error - please try again later");
-      } else if (response.status === 403) {
-        throw new Error("Access denied to ML service - check configuration");
-      } else if (response.status === 502 || response.status === 503) {
-        throw new Error("ML service is temporarily unavailable");
-      } else {
-        throw new Error(`ML service error: ${response.status} ${response.statusText}`);
+      const body = await response.json().catch(() => null);
+      const serverMessage = body && typeof body.error === 'string' ? body.error : null;
+
+      if (response.status === 503) {
+        // Not configured: callers treat null as "analysis unavailable".
+        return null;
       }
+      if (response.status === 401) {
+        throw new Error("Please sign in again to analyze images");
+      }
+      if (response.status === 429) {
+        throw new Error("Too many analysis requests - please wait a few minutes and try again");
+      }
+      throw new Error(serverMessage || "Quality analysis is temporarily unavailable");
     }
 
-    const data: PredictionResponse = await response.json();
-    
+    const data = await response.json();
+
     // Validate response data
     if (!data || typeof data !== 'object') {
-      throw new Error("Invalid response format from ML service");
+      throw new Error("Invalid response format from analysis service");
     }
 
     // Ensure all required fields exist with fallbacks
     const validatedData: PredictionResponse = {
-      filename: data.filename || file.name || 'unknown',
+      filename: file.name || 'unknown',
       predicted_class: data.predicted_class || 'unknown',
       confidence_score: data.confidence_score || '0%',
       quality_score: typeof data.quality_score === 'number' ? data.quality_score : 0,
@@ -72,20 +69,14 @@ export const analyzeCropImage = async (file: File): Promise<PredictionResponse |
     return validatedData;
   } catch (error) {
     if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        console.error("ML API request timed out");
-        throw new Error("Analysis timed out - the ML service may be slow or unavailable");
+      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+        throw new Error("Analysis timed out - the service may be slow or unavailable");
       } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-        console.error("Network error connecting to ML API:", error);
-        throw new Error("Unable to connect to ML analysis service - please check your internet connection");
-      } else {
-        console.error("Error analyzing image:", error);
-        throw error;
+        throw new Error("Unable to connect to the analysis service - please check your internet connection");
       }
-    } else {
-      console.error("Unknown error analyzing image:", error);
-      throw new Error("An unexpected error occurred during analysis");
+      throw error;
     }
+    throw new Error("An unexpected error occurred during analysis");
   }
 };
 

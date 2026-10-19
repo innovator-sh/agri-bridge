@@ -1,61 +1,67 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route } from '@/lib/api/handler';
+import { HttpError, badRequest, forbidden, notFound } from '@/lib/api/errors';
+import { requireRole, uid } from '@/lib/auth/require';
+import { rateLimit } from '@/lib/rate-limit';
+import {
+  ALLOWED_IMAGE_TYPES,
+  MAX_UPLOAD_BYTES,
+  PRODUCT_BUCKET,
+  detectImageType,
+  uploadFieldsSchema,
+} from '@/lib/validation/uploads';
 
-export async function POST(request: NextRequest) {
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
+
+export const POST = route(async (req) => {
+  const session = await requireRole('farmer');
+  const userId = uid(session);
+  rateLimit(`upload:${userId}`, 20, 10 * 60_000);
+
+  let form: FormData;
   try {
-    const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const userId = formData.get('userId') as string;
-    const productId = formData.get('productId') as string;
-
-    if (!file || !userId || !productId) {
-      return NextResponse.json(
-        { error: 'File, userId, and productId are required' },
-        { status: 400 }
-      );
-    }
-
-    // Create file path
-    const fileExt = file.name.split('.').pop();
-    const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const filePath = `${userId}/${productId}/${fileName}`;
-
-    // Convert file to buffer
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-
-    // Upload to Supabase Storage using service role (bypasses RLS)
-    const { data, error } = await supabase.storage
-      .from('Products')
-      .upload(filePath, buffer, {
-        contentType: file.type,
-        upsert: false
-      });
-
-    if (error) {
-      console.error('Upload error:', error);
-      return NextResponse.json(
-        { error: 'Failed to upload file' },
-        { status: 500 }
-      );
-    }
-
-    // Get public URL
-    const { data: { publicUrl } } = supabase.storage
-      .from('Products')
-      .getPublicUrl(filePath);
-
-    return NextResponse.json({
-      success: true,
-      url: publicUrl,
-      path: filePath
-    });
-
-  } catch (error) {
-    console.error('Upload API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    form = await req.formData();
+  } catch {
+    throw badRequest('Request must be multipart form data');
   }
-}
+
+  const file = form.get('file');
+  if (!(file instanceof File)) throw badRequest('File is required');
+  if (file.size === 0) throw badRequest('File is empty');
+  if (file.size > MAX_UPLOAD_BYTES) throw new HttpError(413, 'File must be 5 MB or smaller');
+
+  const rawProductId = form.get('productId');
+  const { productId } = uploadFieldsSchema.parse({ productId: rawProductId === null || rawProductId === '' ? undefined : rawProductId });
+
+  if (productId !== undefined) {
+    const { data: product, error } = await supabase.from('products').select('seller_id').eq('id', productId).maybeSingle();
+    if (error) {
+      console.error('Upload product lookup error:', error);
+      throw new HttpError(500, 'Failed to upload file');
+    }
+    if (!product) throw notFound('Product');
+    if (Number(product.seller_id) !== userId) throw forbidden();
+  }
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const type = detectImageType(buffer);
+  if (!type) throw badRequest('Only JPEG, PNG and WebP images are allowed');
+
+  // Server-chosen path and content type; the client's filename and mime type are ignored.
+  const filePath = `products/${userId}/${randomUUID()}.${ALLOWED_IMAGE_TYPES[type]}`;
+  const { error } = await supabase.storage.from(PRODUCT_BUCKET).upload(filePath, buffer, { contentType: type, upsert: false });
+  if (error) {
+    console.error('Upload error:', error);
+    throw new HttpError(500, 'Failed to upload file');
+  }
+
+  const {
+    data: { publicUrl },
+  } = supabase.storage.from(PRODUCT_BUCKET).getPublicUrl(filePath);
+
+  return NextResponse.json({ success: true, url: publicUrl, path: filePath });
+});

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { ShoppingCart, Plus, Calendar, Users, Package, Clock, CheckCircle, XCircle, AlertCircle, Repeat, Settings, X } from 'lucide-react';
+import { fetchAllPages } from '@/lib/utils/fetchAll';
 
 interface OrderRequest {
   id: number;
@@ -47,11 +48,7 @@ interface OrderApplication {
   };
 }
 
-interface OrderRequestsProps {
-  userId: number;
-}
-
-export default function OrderRequests({ userId }: OrderRequestsProps) {
+export default function OrderRequests() {
   const [orderRequests, setOrderRequests] = useState<OrderRequest[]>([]);
   const [orderSchedules, setOrderSchedules] = useState<OrderSchedule[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,14 +84,8 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
   const fetchOrderRequests = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`/api/order-requests?buyer_id=${userId}`);
-      const data = await response.json();
-      
-      if (response.ok) {
-        setOrderRequests(data.orderRequests || []);
-      } else {
-        console.error('Failed to fetch order requests:', data.error);
-      }
+      const requests = await fetchAllPages<OrderRequest>('/api/order-requests', 'orderRequests');
+      setOrderRequests(requests);
     } catch (error) {
       console.error('Error fetching order requests:', error);
     } finally {
@@ -104,14 +95,8 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
 
   const fetchOrderSchedules = async () => {
     try {
-      const response = await fetch(`/api/order-schedules?buyer_id=${userId}`);
-      const data = await response.json();
-      
-      if (response.ok) {
-        setOrderSchedules(data.schedules || []);
-      } else {
-        console.error('Failed to fetch order schedules:', data.error);
-      }
+      const schedules = await fetchAllPages<OrderSchedule>('/api/order-schedules', 'schedules');
+      setOrderSchedules(schedules);
     } catch (error) {
       console.error('Error fetching order schedules:', error);
     }
@@ -129,7 +114,6 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          buyer_id: userId,
           product_name: formData.product_name,
           quantity: parseInt(formData.quantity),
           by_date: formData.by_date,
@@ -175,7 +159,6 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
       const method = isEditing ? 'PUT' : 'POST';
       
       const body: any = {
-        buyer_id: userId,
         product_name: scheduleFormData.product_name,
         quantity: parseInt(scheduleFormData.quantity),
         allow_multiple_farmers: scheduleFormData.allow_multiple_farmers,
@@ -235,7 +218,6 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
         },
         body: JSON.stringify({
           schedule_id: scheduleId,
-          buyer_id: userId,
           is_active: !isActive
         })
       });
@@ -269,66 +251,6 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
     setShowScheduleForm(true);
   };
 
-  const handleProcessSchedules = async (force = false) => {
-    if (submitting) return;
-    
-    if (!force) {
-      // Check if any schedules are actually due
-      const today = new Date().toISOString().split('T')[0];
-      const dueSchedules = orderSchedules.filter(s => s.is_active && s.next_execution_date <= today);
-      
-      if (dueSchedules.length === 0) {
-        const nextDueDate = orderSchedules
-          .filter(s => s.is_active)
-          .map(s => s.next_execution_date)
-          .sort()[0];
-        
-        if (nextDueDate) {
-          const confirmForce = window.confirm(
-            `No schedules are due for processing right now.\n\nNext scheduled execution: ${formatDate(nextDueDate)}\n\nWould you like to FORCE PROCESS all active schedules for testing purposes?\n\n⚠️ This will create order requests immediately regardless of schedule dates.`
-          );
-          
-          if (confirmForce) {
-            return handleProcessSchedules(true); // Recursive call with force=true
-          }
-        } else {
-          alert('No active schedules found.');
-        }
-        return;
-      }
-    }
-    
-    setSubmitting(true);
-    try {
-      const response = await fetch('/api/process-schedules', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ force })
-      });
-
-      const data = await response.json();
-      
-      if (response.ok) {
-        if (data.processed > 0) {
-          alert(`✅ Successfully processed ${data.processed} schedule(s)!\n\n${force ? '🔧 FORCE MODE: ' : ''}New order requests have been created and are now visible to farmers.`);
-        } else {
-          alert(`ℹ️ ${data.message}\n\n${data.info || ''}`);
-        }
-        fetchOrderRequests();
-        fetchOrderSchedules();
-      } else {
-        alert(`Error: ${data.error}`);
-      }
-    } catch (error) {
-      console.error('Error processing schedules:', error);
-      alert('Error processing schedules. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const handleApplicationAction = async (applicationId: number, status: string) => {
     try {
       const response = await fetch('/api/order-applications', {
@@ -338,8 +260,7 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
         },
         body: JSON.stringify({
           application_id: applicationId,
-          status,
-          buyer_id: userId
+          status
         })
       });
 
@@ -944,34 +865,9 @@ export default function OrderRequests({ userId }: OrderRequestsProps) {
                     </h4>
                     <p className={`text-sm mt-1 ${hasDueSchedules ? 'text-orange-700' : 'text-blue-700'}`}>
                       {hasDueSchedules 
-                        ? 'Click to generate order requests from schedules that are due today'
+                        ? 'Schedules that are due today are processed automatically and will create order requests shortly'
                         : `${activeSchedules.length} active schedule(s). Next due: ${activeSchedules.length > 0 ? formatDate(activeSchedules.map(s => s.next_execution_date).sort()[0]) : 'None'}`}
                     </p>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleProcessSchedules(false)}
-                      disabled={submitting}
-                      className={`px-4 py-2 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center ${
-                        hasDueSchedules 
-                          ? 'bg-orange-600 hover:bg-orange-700' 
-                          : 'bg-blue-600 hover:bg-blue-700'
-                      }`}
-                    >
-                      <Clock className="w-4 h-4 mr-2" />
-                      {submitting ? 'Processing...' : (hasDueSchedules ? 'Process Now' : 'Check Status')}
-                    </button>
-                    {!hasDueSchedules && activeSchedules.length > 0 && (
-                      <button
-                        onClick={() => handleProcessSchedules(true)}
-                        disabled={submitting}
-                        className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center"
-                        title="Force process all active schedules for testing"
-                      >
-                        <AlertCircle className="w-4 h-4 mr-2" />
-                        Force Process
-                      </button>
-                    )}
                   </div>
                 </div>
               </div>

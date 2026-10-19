@@ -74,7 +74,7 @@ export default function LoginPage() {
         const data = await response.json();
 
         if (response.ok) {
-          localStorage.setItem('user', JSON.stringify(data.user));
+          // Session cookie is already set by the server; just go to the role's dashboard.
           if (data.user.role === 'farmer') {
             router.push('/dashboard/farmer');
           } else {
@@ -106,7 +106,7 @@ export default function LoginPage() {
         const data = await response.json();
 
         if (response.ok) {
-          localStorage.setItem('user', JSON.stringify(data.user));
+          // Session cookie is already set by the server; just go to the role's dashboard.
           if (data.user.role === 'farmer') {
             router.push('/dashboard/farmer');
           } else {

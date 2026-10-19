@@ -5,23 +5,12 @@ import { PriceDisplayProps } from '@/lib/types/market-data';
 
 export default function PriceDisplay({ prediction, loading, error, onReload, productName, stateName }: PriceDisplayProps) {
   const handleReload = () => {
-    console.log('🔄 Reload button clicked');
     if (onReload) {
       onReload();
     } else {
       console.warn('⚠️ No onReload function provided');
     }
   };
-  
-  // Debug logging to help track component state
-  console.log('🎯 PriceDisplay render:', { 
-    hasProductName: !!productName, 
-    productName, 
-    stateName, 
-    hasPrediction: !!prediction, 
-    loading, 
-    error: !!error 
-  });
   
   return (
     <div className="bg-green-50 border border-green-200 rounded-xl p-6 mt-4">

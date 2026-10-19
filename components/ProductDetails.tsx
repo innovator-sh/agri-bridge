@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { X, ChevronLeft, ChevronRight, MapPin, User, Phone, Package, DollarSign, Star, Heart, ShoppingCart, Brain, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import { analyzeCropImage, urlToFile, formatClassName, getQualityColor, getConfidenceColor, type PredictionResponse } from '../lib/services/image-analysis-service';
 
@@ -97,11 +97,10 @@ export default function ProductDetails({ product, isOpen, onClose, onAddToCart, 
     }
   };
 
-  if (!isOpen) return null;
-
-  const photos = product.photos && product.photos.length > 0 
-    ? product.photos 
-    : ['/api/placeholder/400/300']; // Fallback placeholder
+  const photos = useMemo(
+    () => (product.photos && product.photos.length > 0 ? product.photos : ['/api/placeholder/400/300']),
+    [product.photos]
+  );
 
   const nextImage = () => {
     setCurrentImageIndex((prev) => (prev + 1) % photos.length);
@@ -171,6 +170,8 @@ export default function ProductDetails({ product, isOpen, onClose, onAddToCart, 
 
   // Check if the current user is the seller of this product
   const isOwnProduct = userRole === 'farmer' && currentUserId === product.seller_id;
+
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">

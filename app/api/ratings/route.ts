@@ -1,392 +1,175 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import supabase from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError, badRequest, notFound } from '@/lib/api/errors';
+import { requireUser, uid } from '@/lib/auth/require';
+import { rateLimit } from '@/lib/rate-limit';
+import {
+  createRatingSchema,
+  deleteRatingQuerySchema,
+  ratingsQuerySchema,
+  updateRatingSchema,
+} from '@/lib/validation/ratings';
 
-// GET - Fetch ratings for an order or user
-export async function GET(request: NextRequest) {
-    try {
-        const { searchParams } = new URL(request.url);
-        const orderId = searchParams.get('orderId');
-        const userId = searchParams.get('userId');
-        const userType = searchParams.get('userType'); // 'buyer' or 'seller'
+type Row = Record<string, any>;
 
-        if (orderId) {
-            // Fetch ratings for a specific order with manual joins
-            const { data: ratings, error } = await supabase
-                .from('ratings')
-                .select('*')
-                .eq('order_id', parseInt(orderId))
-                .order('created_at', { ascending: false });
+const query = (req: Request) => Object.fromEntries(new URL(req.url).searchParams);
+const fail = (what: string, err: unknown): never => {
+  console.error(`[ratings] ${what}`, err);
+  throw new HttpError(500, `Failed to ${what}`);
+};
 
-            if (error) {
-                console.error('Ratings fetch error:', error);
-                // If table doesn't exist, return empty array instead of error
-                if (error.code === 'PGRST116' || error.message?.includes('relation "ratings" does not exist')) {
-                    return NextResponse.json({
-                        ratings: [],
-                        message: 'Ratings table does not exist yet. Please create it first.'
-                    });
-                }
-                return NextResponse.json(
-                    { error: 'Failed to fetch ratings', details: error.message },
-                    { status: 500 }
-                );
-            }
+/** Attach rater/rated names and order->product with two batched queries (no per-row lookups). */
+async function enrich(ratings: Row[], withRated: boolean): Promise<Row[]> {
+  if (ratings.length === 0) return [];
+  const userIds = [...new Set(ratings.flatMap((r) => [r.rater_id, r.rated_id]))];
+  const orderIds = [...new Set(ratings.map((r) => r.order_id))];
 
-            // Manually fetch user details for each rating
-            const ratingsWithUsers = await Promise.all(
-                (ratings || []).map(async (rating) => {
-                    // Fetch rater details
-                    const { data: rater } = await supabase
-                        .from('users')
-                        .select('id, name')
-                        .eq('id', rating.rater_id)
-                        .single();
+  const [users, orders] = await Promise.all([
+    supabase.from('users').select('id, name').in('id', userIds),
+    supabase.from('orders').select('id, product_id, product:products (id, name)').in('id', orderIds),
+  ]);
+  if (users.error) fail('load ratings', users.error);
+  if (orders.error) fail('load ratings', orders.error);
 
-                    // Fetch rated user details
-                    const { data: rated } = await supabase
-                        .from('users')
-                        .select('id, name')
-                        .eq('id', rating.rated_id)
-                        .single();
+  const userMap = new Map(((users.data ?? []) as unknown as Row[]).map((u) => [Number(u.id), u]));
+  const orderMap = new Map(((orders.data ?? []) as unknown as Row[]).map((o) => [Number(o.id), o]));
+  const person = (id: number) => userMap.get(Number(id)) ?? { id, name: 'Unknown User' };
 
-                    // Fetch order and product details
-                    const { data: order } = await supabase
-                        .from('orders')
-                        .select('id, product_id')
-                        .eq('id', rating.order_id)
-                        .single();
-
-                    let product = null;
-                    if (order?.product_id) {
-                        const { data: productData } = await supabase
-                            .from('products')
-                            .select('id, name')
-                            .eq('id', order.product_id)
-                            .single();
-                        product = productData;
-                    }
-
-                    return {
-                        ...rating,
-                        rater: rater || { id: rating.rater_id, name: 'Unknown User' },
-                        rated: rated || { id: rating.rated_id, name: 'Unknown User' },
-                        order: order ? {
-                            id: order.id,
-                            product: product || { id: order.product_id, name: 'Unknown Product' }
-                        } : null
-                    };
-                })
-            );
-
-            return NextResponse.json({
-                ratings: ratingsWithUsers
-            });
-        }
-
-        if (userId && userType) {
-            // Fetch ratings received by a user
-            const { data: ratings, error } = await supabase
-                .from('ratings')
-                .select('*')
-                .eq('rated_id', parseInt(userId))
-                .eq('rater_type', userType === 'buyer' ? 'seller' : 'buyer')
-                .order('created_at', { ascending: false });
-
-            if (error) {
-                console.error('User ratings fetch error:', error);
-                // If table doesn't exist, return empty array instead of error
-                if (error.code === 'PGRST116' || error.message?.includes('relation "ratings" does not exist')) {
-                    return NextResponse.json({
-                        ratings: [],
-                        message: 'Ratings table does not exist yet. Please create it first.'
-                    });
-                }
-                return NextResponse.json(
-                    { error: 'Failed to fetch user ratings', details: error.message },
-                    { status: 500 }
-                );
-            }
-
-            // Manually fetch user and order details for each rating
-            const ratingsWithDetails = await Promise.all(
-                (ratings || []).map(async (rating) => {
-                    // Fetch rater details
-                    const { data: rater } = await supabase
-                        .from('users')
-                        .select('id, name')
-                        .eq('id', rating.rater_id)
-                        .single();
-
-                    // Fetch order and product details
-                    const { data: order } = await supabase
-                        .from('orders')
-                        .select('id, product_id')
-                        .eq('id', rating.order_id)
-                        .single();
-
-                    let product = null;
-                    if (order?.product_id) {
-                        const { data: productData } = await supabase
-                            .from('products')
-                            .select('id, name')
-                            .eq('id', order.product_id)
-                            .single();
-                        product = productData;
-                    }
-
-                    return {
-                        ...rating,
-                        rater: rater || { id: rating.rater_id, name: 'Unknown User' },
-                        order: order ? {
-                            id: order.id,
-                            product: product || { id: order.product_id, name: 'Unknown Product' }
-                        } : null
-                    };
-                })
-            );
-
-            return NextResponse.json({
-                ratings: ratingsWithDetails
-            });
-        }
-
-        return NextResponse.json(
-            { error: 'Order ID or User ID with user type is required' },
-            { status: 400 }
-        );
-
-    } catch (error) {
-        console.error('Ratings GET API error:', error);
-        return NextResponse.json(
-            { error: 'Internal server error' },
-            { status: 500 }
-        );
-    }
+  return ratings.map((r) => {
+    const o = orderMap.get(Number(r.order_id));
+    return {
+      ...r,
+      rater: person(r.rater_id),
+      ...(withRated ? { rated: person(r.rated_id) } : {}),
+      order: o ? { id: o.id, product: o.product ?? { id: o.product_id, name: 'Unknown Product' } } : null,
+    };
+  });
 }
 
-// POST - Create new rating
-export async function POST(request: NextRequest) {
-    try {
-        const {
-            orderId,
-            raterId,
-            ratedId,
-            raterType, // 'buyer' or 'seller'
-            rating,
-            review
-        } = await request.json();
+// GET - ?orderId=, ?orderIds=1,2,3 (batch) or ?userId=&userType= (ratings received by a user)
+export const GET = route(async (req) => {
+  const me = uid(await requireUser());
+  const q = ratingsQuerySchema.parse(query(req));
+  const page = { limit: q.limit, offset: q.offset };
 
-        if (!orderId || !raterId || !ratedId || !raterType || !rating) {
-            return NextResponse.json(
-                { error: 'Missing required fields' },
-                { status: 400 }
-            );
-        }
+  const ids = q.orderIds ?? (q.orderId ? [q.orderId] : null);
+  if (ids) {
+    // Only orders the session user is a party to.
+    const { data: orders, error: oErr } = await supabase
+      .from('orders')
+      .select('id')
+      .in('id', ids)
+      .or(`buyer_id.eq.${me},seller_id.eq.${me}`);
+    if (oErr) fail('fetch ratings', oErr);
+    const allowed = ((orders ?? []) as unknown as Row[]).map((o) => o.id);
+    if (q.orderId && !q.orderIds && allowed.length === 0) throw notFound('Order');
 
-        // Validate rating value
-        if (rating < 1 || rating > 5) {
-            return NextResponse.json(
-                { error: 'Rating must be between 1 and 5' },
-                { status: 400 }
-            );
-        }
+    const { data, count, error } = allowed.length
+      ? await supabase
+          .from('ratings')
+          .select('*', { count: 'exact' })
+          .in('order_id', allowed)
+          .order('created_at', { ascending: false })
+          .range(q.offset, q.offset + q.limit - 1)
+      : { data: [], count: 0, error: null };
+    if (error) fail('fetch ratings', error);
 
-        // Check if rating already exists for this order and rater
-        const { data: existingRating, error: checkError } = await supabase
-            .from('ratings')
-            .select('id')
-            .eq('order_id', orderId)
-            .eq('rater_id', raterId)
-            .maybeSingle(); // Use maybeSingle instead of single to handle no results gracefully
+    return NextResponse.json({
+      ratings: await enrich((data ?? []) as unknown as Row[], true),
+      total: count ?? 0,
+      ...page,
+    });
+  }
 
-        if (checkError) {
-            console.error('Rating check error:', checkError);
-            // If table doesn't exist, return a more helpful error
-            if (checkError.code === 'PGRST116' || checkError.message?.includes('relation "ratings" does not exist')) {
-                return NextResponse.json(
-                    { error: 'Ratings table does not exist. Please create it first by visiting /api/create-ratings-table' },
-                    { status: 500 }
-                );
-            }
-            return NextResponse.json(
-                { error: 'Failed to check existing rating', details: checkError.message },
-                { status: 500 }
-            );
-        }
+  // Ratings received by a user (defaults to the session user); reviews are public profile data.
+  const userId = q.userId ?? me;
+  let received = supabase.from('ratings').select('*', { count: 'exact' }).eq('rated_id', userId);
+  if (q.userType) received = received.eq('rater_type', q.userType === 'buyer' ? 'seller' : 'buyer');
+  const { data, count, error } = await received
+    .order('created_at', { ascending: false })
+    .range(q.offset, q.offset + q.limit - 1);
+  if (error) fail('fetch ratings', error);
 
-        if (existingRating) {
-            return NextResponse.json(
-                { error: 'Rating already exists for this order' },
-                { status: 400 }
-            );
-        }
+  return NextResponse.json({
+    ratings: await enrich((data ?? []) as unknown as Row[], false),
+    total: count ?? 0,
+    ...page,
+  });
+});
 
-        // Verify the order exists and the rater is part of it
-        const { data: order, error: orderError } = await supabase
-            .from('orders')
-            .select('buyer_id, seller_id, status')
-            .eq('id', orderId)
-            .single();
+// POST - rate the other party of a delivered order you took part in
+export const POST = route(async (req) => {
+  const me = uid(await requireUser());
+  rateLimit(`ratings:${me}`, 20, 60_000);
+  const body = await parseJson(req, createRatingSchema);
 
-        if (orderError || !order) {
-            return NextResponse.json(
-                { error: 'Order not found' },
-                { status: 404 }
-            );
-        }
+  const { data: order, error: oErr } = await supabase
+    .from('orders')
+    .select('buyer_id, seller_id, status')
+    .eq('id', body.orderId)
+    .maybeSingle();
+  if (oErr) fail('create rating', oErr);
+  const o = order as unknown as Row | null;
+  // Same 404 for missing and foreign orders so ids cannot be probed.
+  if (!o || (o.buyer_id !== me && o.seller_id !== me)) throw notFound('Order');
+  if (o.status !== 'delivered') throw badRequest('Only delivered orders can be rated');
 
-        // Verify the rater is part of this order
-        const isValidRater = (raterType === 'buyer' && order.buyer_id === raterId) ||
-            (raterType === 'seller' && order.seller_id === raterId);
+  const asBuyer = o.buyer_id === me;
+  const { data: created, error } = await supabase
+    .from('ratings')
+    .insert({
+      order_id: body.orderId,
+      rater_id: me,
+      rated_id: asBuyer ? o.seller_id : o.buyer_id,
+      rater_type: asBuyer ? 'buyer' : 'seller',
+      rating: body.rating,
+      review: body.review || null,
+    } as never)
+    .select()
+    .single();
 
-        if (!isValidRater) {
-            return NextResponse.json(
-                { error: 'Unauthorized to rate this order' },
-                { status: 403 }
-            );
-        }
+  if (error) {
+    if (error.code === '23505') throw new HttpError(409, 'You have already rated this order');
+    fail('create rating', error);
+  }
 
-        // Allow rating for orders of any status (removed delivery requirement)
+  const [rating] = await enrich([created as unknown as Row], true);
+  return NextResponse.json({ success: true, rating, message: 'Rating submitted successfully' });
+});
 
-        // Create rating
-        const { data: newRating, error: ratingError } = await supabase
-            .from('ratings')
-            .insert({
-                order_id: orderId,
-                rater_id: raterId,
-                rated_id: ratedId,
-                rater_type: raterType,
-                rating,
-                review: review || null
-            })
-            .select()
-            .single();
+// PUT - edit your own rating
+export const PUT = route(async (req) => {
+  const me = uid(await requireUser());
+  const body = await parseJson(req, updateRatingSchema);
 
-        if (ratingError) {
-            console.error('Rating creation error:', ratingError);
-            return NextResponse.json(
-                { error: 'Failed to create rating' },
-                { status: 500 }
-            );
-        }
+  const { data, error } = await supabase
+    .from('ratings')
+    .update({ rating: body.rating, review: body.review || null, updated_at: new Date().toISOString() } as never)
+    .eq('id', body.ratingId)
+    .eq('rater_id', me)
+    .select()
+    .maybeSingle();
+  if (error) fail('update rating', error);
+  if (!data) throw notFound('Rating');
 
-        // Manually fetch user details for the response
-        const { data: rater } = await supabase
-            .from('users')
-            .select('id, name')
-            .eq('id', raterId)
-            .single();
+  const [rating] = await enrich([data as unknown as Row], true);
+  return NextResponse.json({ success: true, rating, message: 'Rating updated successfully' });
+});
 
-        const { data: rated } = await supabase
-            .from('users')
-            .select('id, name')
-            .eq('id', ratedId)
-            .single();
+// DELETE - remove your own rating (?ratingId=)
+export const DELETE = route(async (req) => {
+  const me = uid(await requireUser());
+  const { ratingId } = deleteRatingQuerySchema.parse(query(req));
 
-        const ratingWithUsers = {
-            ...newRating,
-            rater: rater || { id: raterId, name: 'Unknown User' },
-            rated: rated || { id: ratedId, name: 'Unknown User' }
-        };
+  const { data, error } = await supabase
+    .from('ratings')
+    .delete()
+    .eq('id', ratingId)
+    .eq('rater_id', me)
+    .select('id');
+  if (error) fail('delete rating', error);
+  if (!data || data.length === 0) throw notFound('Rating');
 
-        return NextResponse.json({
-            success: true,
-            rating: ratingWithUsers,
-            message: 'Rating submitted successfully'
-        });
-
-    } catch (error) {
-        console.error('Ratings POST API error:', error);
-        return NextResponse.json(
-            { error: 'Internal server error' },
-            { status: 500 }
-        );
-    }
-}
-
-// PUT - Update existing rating
-export async function PUT(request: NextRequest) {
-    try {
-        const {
-            ratingId,
-            raterId,
-            rating,
-            review
-        } = await request.json();
-
-        if (!ratingId || !raterId || !rating) {
-            return NextResponse.json(
-                { error: 'Missing required fields' },
-                { status: 400 }
-            );
-        }
-
-        // Validate rating value
-        if (rating < 1 || rating > 5) {
-            return NextResponse.json(
-                { error: 'Rating must be between 1 and 5' },
-                { status: 400 }
-            );
-        }
-
-        // Update rating (only if the rater owns it)
-        const { data: updatedRating, error: updateError } = await supabase
-            .from('ratings')
-            .update({
-                rating,
-                review: review || null,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', ratingId)
-            .eq('rater_id', raterId)
-            .select()
-            .single();
-
-        if (updateError) {
-            console.error('Rating update error:', updateError);
-            return NextResponse.json(
-                { error: 'Failed to update rating' },
-                { status: 500 }
-            );
-        }
-
-        if (!updatedRating) {
-            return NextResponse.json(
-                { error: 'Rating not found or unauthorized' },
-                { status: 404 }
-            );
-        }
-
-        // Manually fetch user details for the response
-        const { data: rater } = await supabase
-            .from('users')
-            .select('id, name')
-            .eq('id', raterId)
-            .single();
-
-        const { data: rated } = await supabase
-            .from('users')
-            .select('id, name')
-            .eq('id', updatedRating.rated_id)
-            .single();
-
-        const ratingWithUsers = {
-            ...updatedRating,
-            rater: rater || { id: raterId, name: 'Unknown User' },
-            rated: rated || { id: updatedRating.rated_id, name: 'Unknown User' }
-        };
-
-        return NextResponse.json({
-            success: true,
-            rating: ratingWithUsers,
-            message: 'Rating updated successfully'
-        });
-
-    } catch (error) {
-        console.error('Ratings PUT API error:', error);
-        return NextResponse.json(
-            { error: 'Internal server error' },
-            { status: 500 }
-        );
-    }
-}
+  return NextResponse.json({ success: true, message: 'Rating deleted successfully' });
+});

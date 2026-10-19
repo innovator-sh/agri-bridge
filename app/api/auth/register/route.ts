@@ -1,73 +1,36 @@
-import { NextRequest, NextResponse } from 'next/server';
-import supabase from '@/lib/supabase';
+import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
+import supabase from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { registerSchema } from '@/lib/validation/auth';
+import { rateLimit, clientIp } from '@/lib/rate-limit';
+import { signSession, SESSION_COOKIE, sessionCookieOptions } from '@/lib/auth/session';
+import { HttpError } from '@/lib/api/errors';
 
-export async function POST(request: NextRequest) {
-  try {
-    const { name, email, phone_number, password, role } = await request.json();
+export const POST = route(async (req) => {
+  rateLimit(`register:${clientIp(req)}`, 5, 60 * 60_000);
+  const { name, email, phone_number, password, role } = await parseJson(req, registerSchema);
+  const phone = phone_number || null;
 
-    if (!name || !email || !password || !role) {
-      return NextResponse.json(
-        { error: 'Name, email, password, and role are required' },
-        { status: 400 }
-      );
-    }
+  const { data: byEmail } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+  const { data: byPhone } = phone
+    ? await supabase.from('users').select('id').eq('phone_number', phone).maybeSingle()
+    : { data: null };
+  if (byEmail || byPhone) throw new HttpError(409, 'An account with these details already exists');
 
-    if (!['farmer', 'buyer'].includes(role)) {
-      return NextResponse.json(
-        { error: 'Role must be either farmer or buyer' },
-        { status: 400 }
-      );
-    }
-
-    // Check if user already exists
-    const { data: existingUser, error: checkError } = await supabase
-      .from('users')
-      .select('id')
-      .or(`email.eq.${email},phone_number.eq.${phone_number}`)
-      .single();
-
-    if (existingUser) {
-      return NextResponse.json(
-        { error: 'User with this email or phone number already exists' },
-        { status: 409 }
-      );
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Insert new user
-    const { data: newUser, error } = await supabase
-      .from('users')
-      .insert({
-        name,
-        email,
-        phone_number,
-        password: hashedPassword,
-        role
-      })
-      .select('id, name, email, phone_number, role, created_at')
-      .single();
-
-    if (error) {
-      console.error('Registration error:', error);
-      return NextResponse.json(
-        { error: 'Registration failed' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      message: 'User registered successfully',
-      user: newUser
-    }, { status: 201 });
-
-  } catch (error) {
-    console.error('Registration error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const hashed = await bcrypt.hash(password, 12);
+  const { data: user, error } = await supabase
+    .from('users')
+    .insert({ name, email, phone_number: phone, password: hashed, role })
+    .select('id, name, email, phone_number, role, created_at')
+    .single();
+  if (error || !user) {
+    console.error('[register] insert failed', error);
+    throw new HttpError(500, 'Registration failed');
   }
-}
+
+  const token = await signSession({ userId: String(user.id), role });
+  const res = NextResponse.json({ message: 'User registered successfully', user }, { status: 201 });
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions);
+  return res;
+});

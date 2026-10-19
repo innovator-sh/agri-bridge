@@ -1,118 +1,78 @@
-import { NextRequest, NextResponse } from 'next/server';
-import supabase from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError } from '@/lib/api/errors';
+import { requireUser, requireRole, uid } from '@/lib/auth/require';
+import { createProductSchema, listProductsQuery, escapeSearch } from '@/lib/validation/products';
 
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const sellerId = searchParams.get('seller_id');
-    const category = searchParams.get('category');
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
 
-    let query = supabase
-      .from('products')
-      .select(`
-        *,
-        users!products_seller_id_fkey (
-          name,
-          phone_number
-        )
-      `)
-      .eq('status', 'active')
-      .order('created_at', { ascending: false });
+export const GET = route(async (req) => {
+  const session = await requireUser();
+  const params = Object.fromEntries([...new URL(req.url).searchParams].filter(([, v]) => v !== ''));
+  const q = listProductsQuery.parse(params);
 
-    if (sellerId) {
-      query = query.eq('seller_id', sellerId);
-    }
+  let query = supabase
+    .from('products')
+    .select('*, users!products_seller_id_fkey (name, phone_number)', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(q.offset, q.offset + q.limit - 1);
 
-    if (category) {
-      query = query.eq('category', category);
-    }
+  // Only a farmer looking at their own listings may see non-active products.
+  const ownListing = session.role === 'farmer' && q.seller_id === uid(session);
+  const status = ownListing && q.status ? q.status : 'active';
+  if (status !== 'all') query = query.eq('status', status);
 
-    const { data: products, error } = await query;
-
-    if (error) {
-      console.error('Products fetch error:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch products' },
-        { status: 500 }
-      );
-    }
-
-    // Transform the data to match the expected format
-    const transformedProducts = products?.map(product => ({
-      ...product,
-      seller_name: product.users?.name,
-      seller_phone: product.users?.phone_number,
-      photos: product.photos || []
-    })) || [];
-
-    // Debug logging
-    console.log('Products with photos:', transformedProducts.map(p => ({
-      id: p.id,
-      name: p.name,
-      photos: p.photos
-    })));
-
-    return NextResponse.json({
-      products: transformedProducts
-    });
-
-  } catch (error) {
-    console.error('Products API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (q.seller_id) query = query.eq('seller_id', q.seller_id);
+  if (q.category) query = query.eq('category', q.category);
+  if (q.search) {
+    const s = escapeSearch(q.search);
+    if (s) query = query.or(`name.ilike.%${s}%,category.ilike.%${s}%`);
   }
-}
 
-export async function POST(request: NextRequest) {
-  try {
-    const productData = await request.json();
-
-    const { name, category, quantity, seller_id, price_single, price_multiple, location, description } = productData;
-
-    if (!name || !category || !quantity || !seller_id || !price_single) {
-      return NextResponse.json(
-        { error: 'Name, category, quantity, seller_id, and price_single are required' },
-        { status: 400 }
-      );
-    }
-
-    const { data: product, error } = await supabase
-      .from('products')
-      .insert({
-        name,
-        category,
-        quantity,
-        seller_id,
-        price_single,
-        price_multiple,
-        location,
-        description,
-        status: 'active',
-        photos: []
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Product creation error:', error);
-      return NextResponse.json(
-        { error: 'Failed to create product' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      product
-    });
-
-  } catch (error) {
-    console.error('Products POST API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const { data, error, count } = await query;
+  if (error) {
+    console.error('Products fetch error:', error);
+    throw new HttpError(500, 'Failed to fetch products');
   }
-}
+
+  const products = (data ?? []).map((p: Record<string, any>) => ({
+    ...p,
+    seller_name: p.users?.name,
+    seller_phone: p.users?.phone_number,
+    photos: p.photos || [],
+  }));
+
+  return NextResponse.json({ products, total: count ?? products.length, limit: q.limit, offset: q.offset });
+});
+
+export const POST = route(async (req) => {
+  const session = await requireRole('farmer');
+  const input = await parseJson(req, createProductSchema);
+
+  const { data: product, error } = await supabase
+    .from('products')
+    .insert({
+      name: input.name,
+      category: input.category,
+      quantity: input.quantity,
+      seller_id: uid(session),
+      price_single: input.price_single,
+      price_multiple: input.price_multiple ?? null,
+      location: input.location ?? null,
+      description: input.description ?? null,
+      status: 'active',
+      photos: [],
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Product creation error:', error);
+    throw new HttpError(500, 'Failed to create product');
+  }
+
+  return NextResponse.json({ success: true, product });
+});

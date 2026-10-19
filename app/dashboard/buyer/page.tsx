@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useI18n } from '@/lib/i18n/context';
+import { useSession } from '@/lib/hooks/useSession';
+import { fetchAllPages, fetchRatingsForOrders } from '@/lib/utils/fetchAll';
 import { 
   BarChart3, 
   ShoppingCart, 
@@ -28,15 +30,6 @@ import Dashboard from '@/components/Dashboard';
 import OrderRequests from '@/components/OrderRequests';
 import ReorderModal from '@/components/ReorderModal';
 import LanguageSwitcher from '@/components/LanguageSwitcher';
-
-interface User {
-  id: number;
-  name: string;
-  email: string;
-  phone_number: string;
-  role: string;
-  // role: string;
-}
 
 interface Product {
   id: number;
@@ -75,7 +68,8 @@ interface CartItem {
 export default function BuyerDashboard() {
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [user, setUser] = useState<User | null>(null);
+  const router = useRouter();
+  const { user, loading: sessionLoading, logout } = useSession();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -96,31 +90,32 @@ export default function BuyerDashboard() {
   const [selectedOrderForReorder, setSelectedOrderForReorder] = useState<any>(null);
   const [userLocation, setUserLocation] = useState<{latitude: number, longitude: number, address?: string, state?: string} | null>(null);
 
+  // Session gate: redirect unauthenticated users / wrong role, then load data
   useEffect(() => {
-    // Get user from localStorage
-    const userData = localStorage.getItem('user');
-    if (userData) {
-      const parsedUser = JSON.parse(userData);
-      setUser(parsedUser);
-      fetchCart(parsedUser.id);
-      fetchOrders(parsedUser.id);
-      fetchReceivedRatings(parsedUser.id);
-      fetchUserStats(parsedUser.id);
+    if (sessionLoading) return;
+    if (!user) {
+      router.replace('/login');
+      return;
     }
+    if (user.role !== 'buyer') {
+      router.replace('/dashboard/farmer');
+      return;
+    }
+    fetchCart();
+    fetchOrders(user.id);
+    fetchReceivedRatings(user.id);
+    fetchUserStats();
     fetchProducts();
     fetchSuppliers();
 
     // Get user location for weather
     if (navigator.geolocation) {
-      console.log('Requesting user location for weather...');
       navigator.geolocation.getCurrentPosition(
         async (position) => {
           const coords = {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude
           };
-          
-          console.log('User location obtained:', coords);
           
           try {
             // Use reverse geocoding to get address information
@@ -138,11 +133,8 @@ export default function BuyerDashboard() {
                 address,
                 state: state
               };
-              
-              console.log('Location data with address:', locationData);
               setUserLocation(locationData);
             } else {
-              console.log('Geocoding failed, using coordinates only');
               setUserLocation(coords);
             }
           } catch (error) {
@@ -156,15 +148,13 @@ export default function BuyerDashboard() {
         { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
       );
     } else {
-      console.log('Geolocation not supported by browser');
     }
-  }, []);
+  }, [sessionLoading, user?.id, user?.role]);
 
   const fetchProducts = async () => {
     try {
-      const response = await fetch('/api/products');
-      const data = await response.json();
-      setProducts(data.products || []);
+      const productsData = await fetchAllPages<Product>('/api/products', 'products');
+      setProducts(productsData);
     } catch (error) {
       console.error('Error fetching products:', error);
     } finally {
@@ -174,17 +164,16 @@ export default function BuyerDashboard() {
 
   const fetchSuppliers = async () => {
     try {
-      const response = await fetch('/api/suppliers');
-      const data = await response.json();
-      setSuppliers(data.suppliers || []);
+      const suppliersData = await fetchAllPages<any>('/api/suppliers', 'suppliers');
+      setSuppliers(suppliersData);
     } catch (error) {
       console.error('Error fetching suppliers:', error);
     }
   };
 
-  const fetchCart = async (userId: number) => {
+  const fetchCart = async () => {
     try {
-      const response = await fetch(`/api/cart?userId=${userId}`);
+      const response = await fetch('/api/cart');
       const data = await response.json();
       setCartItems(data.cart?.products || []);
     } catch (error) {
@@ -192,26 +181,22 @@ export default function BuyerDashboard() {
     }
   };
 
-  const fetchOrders = async (userId: number) => {
+  const fetchOrders = async (currentUserId: number) => {
     try {
-      const response = await fetch(`/api/orders?userId=${userId}&userType=buyer`);
-      const data = await response.json();
-      const ordersData = data.orders || [];
+      const ordersData = await fetchAllPages<any>('/api/orders?role=buyer', 'orders');
       setOrders(ordersData);
-      
-      // Fetch ratings for each order
+
+      // Fetch ratings for all orders in batched requests
       const ratingsMap: {[key: number]: any} = {};
-      for (const order of ordersData) {
-        try {
-          const ratingsResponse = await fetch(`/api/ratings?orderId=${order.id}`);
-          const ratingsData = await ratingsResponse.json();
-          const buyerRating = ratingsData.ratings?.find((r: any) => r.rater_id === userId);
-          if (buyerRating) {
-            ratingsMap[order.id] = buyerRating;
+      try {
+        const allRatings = await fetchRatingsForOrders(ordersData.map((o: any) => o.id));
+        for (const r of allRatings) {
+          if (r.rater_id === currentUserId) {
+            ratingsMap[r.order_id] = r;
           }
-        } catch (error) {
-          console.error(`Error fetching ratings for order ${order.id}:`, error);
         }
+      } catch (error) {
+        console.error('Error fetching ratings for orders:', error);
       }
       setOrderRatings(ratingsMap);
     } catch (error) {
@@ -219,9 +204,9 @@ export default function BuyerDashboard() {
     }
   };
 
-  const fetchReceivedRatings = async (userId: number) => {
+  const fetchReceivedRatings = async (currentUserId: number) => {
     try {
-      const response = await fetch(`/api/ratings?userId=${userId}&userType=buyer`);
+      const response = await fetch(`/api/ratings?userId=${currentUserId}&userType=buyer`);
       const data = await response.json();
       setReceivedRatings(data.ratings || []);
     } catch (error) {
@@ -229,10 +214,10 @@ export default function BuyerDashboard() {
     }
   };
 
-  const fetchUserStats = async (userId: number) => {
+  const fetchUserStats = async () => {
     setStatsLoading(true);
     try {
-      const response = await fetch(`/api/user-stats?userId=${userId}&userType=buyer`);
+      const response = await fetch('/api/user-stats?userType=buyer');
       const data = await response.json();
       setUserStats(data);
     } catch (error) {
@@ -278,12 +263,9 @@ export default function BuyerDashboard() {
       const existingRating = orderRatings[selectedOrderForRating.id];
       const method = existingRating ? 'PUT' : 'POST';
       const body = existingRating 
-        ? { ratingId: existingRating.id, raterId: user.id, rating, review }
+        ? { ratingId: existingRating.id, rating, review }
         : {
             orderId: selectedOrderForRating.id,
-            raterId: user.id,
-            ratedId: selectedOrderForRating.seller.id,
-            raterType: 'buyer',
             rating,
             review
           };
@@ -303,17 +285,7 @@ export default function BuyerDashboard() {
         }));
         alert(existingRating ? 'Rating updated successfully!' : 'Rating submitted successfully!');
       } else {
-        // Check if it's a table missing error
-        if (result.error?.includes('Ratings table does not exist')) {
-          const shouldSetup = confirm(
-            'The ratings table needs to be created first. Would you like to go to the setup page?'
-          );
-          if (shouldSetup) {
-            window.open('/setup', '_blank');
-          }
-        } else {
-          alert(result.error || 'Failed to submit rating');
-        }
+        alert(result.error || 'Failed to submit rating');
       }
     } catch (error) {
       console.error('Error submitting rating:', error);
@@ -331,18 +303,13 @@ export default function BuyerDashboard() {
 
     try {
       const order = selectedOrderForReorder;
-      const newTotalPrice = quantity * order.unit_price;
 
       const response = await fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          buyerId: user.id,
-          sellerId: order.seller_id,
           productId: order.product_id,
           quantity: quantity,
-          unitPrice: order.unit_price,
-          totalPrice: newTotalPrice,
           deliveryAddress: order.delivery_address,
           notes: `Reorder of order #${order.id} (${quantity}kg)`
         })
@@ -370,7 +337,6 @@ export default function BuyerDashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: user.id,
           productId,
           quantity
         })
@@ -378,7 +344,7 @@ export default function BuyerDashboard() {
 
       const result = await response.json();
       if (result.success) {
-        fetchCart(user.id); // Refresh cart
+        fetchCart(); // Refresh cart
         alert(`${quantity}kg added to cart!`);
         setSelectedQuantity(prev => ({ ...prev, [productId]: 1 })); // Reset quantity
       } else {
@@ -398,7 +364,6 @@ export default function BuyerDashboard() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: user.id,
           productId,
           quantity
         })
@@ -406,7 +371,7 @@ export default function BuyerDashboard() {
 
       const result = await response.json();
       if (result.success) {
-        fetchCart(user.id); // Refresh cart
+        fetchCart(); // Refresh cart
       }
     } catch (error) {
       console.error('Error updating cart:', error);
@@ -421,14 +386,13 @@ export default function BuyerDashboard() {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: user.id,
           productId
         })
       });
 
       const result = await response.json();
       if (result.success) {
-        fetchCart(user.id); // Refresh cart
+        fetchCart(); // Refresh cart
         alert('Product removed from cart!');
       }
     } catch (error) {
@@ -459,6 +423,14 @@ export default function BuyerDashboard() {
     product.seller_name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  if (sessionLoading || !user || user.role !== 'buyer') {
+    return (
+      <div className="min-h-screen bg-blue-50 flex items-center justify-center">
+        <div className="text-gray-500">{t('messages.loadingProducts')}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-blue-50">
       {/* Header */}
@@ -478,9 +450,9 @@ export default function BuyerDashboard() {
             <div className="flex items-center space-x-4">
               <LanguageSwitcher />
               <span className="text-sm text-gray-600">{t('farmer.welcome')}, {user?.name}</span>
-              <Link href="/" className="text-sm text-white hover:text-gray-700 px-4 py-1 bg-red-400 rounded-lg">
+              <button onClick={logout} className="text-sm text-white hover:text-gray-700 px-4 py-1 bg-red-400 rounded-lg">
                 Logout
-              </Link>
+              </button>
             </div>
           </div>
           
@@ -496,9 +468,9 @@ export default function BuyerDashboard() {
               </div>
               <div className="flex items-center space-x-2">
                 <LanguageSwitcher />
-                <Link href="/" className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
+                <button onClick={logout} className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
                   Logout
-                </Link>
+                </button>
               </div>
             </div>
             <div className="text-center">
@@ -634,7 +606,7 @@ export default function BuyerDashboard() {
           <div className="flex-1">
             {/* Order Requests Tab */}
             {activeTab === 'order-requests' && user && (
-              <OrderRequests userId={user.id} />
+              <OrderRequests />
             )}
 
             {/* Profile Tab */}
@@ -907,7 +879,8 @@ export default function BuyerDashboard() {
                         )}
 
                         <div className="flex gap-2">
-                          {/* Rating button for all order statuses */}
+                          {/* Rating button - only delivered orders can be rated */}
+                          {order.status === 'delivered' && (
                           <button 
                             onClick={() => handleRateOrder(order)}
                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -918,6 +891,7 @@ export default function BuyerDashboard() {
                           >
                             {orderRatings[order.id] ? 'Update Rating' : 'Rate & Review'}
                           </button>
+                          )}
                           
                           {/* Reorder button - only for delivered orders */}
                           {order.status === 'delivered' && (
@@ -1201,16 +1175,6 @@ export default function BuyerDashboard() {
 
                         {/* Contact Info */}
                         <div className="space-y-2 mb-4">
-                          <div className="flex items-center text-sm text-gray-600">
-                            <span className="w-4 h-4 mr-2">📧</span>
-                            <a 
-                              href={`mailto:${supplier.email}`}
-                              className="truncate hover:text-blue-600 transition-colors"
-                              title={`Email ${supplier.name}`}
-                            >
-                              {supplier.email}
-                            </a>
-                          </div>
                           {supplier.phone_number && (
                             <div className="flex items-center text-sm text-gray-600">
                               <span className="w-4 h-4 mr-2">📱</span>
@@ -1366,10 +1330,10 @@ export default function BuyerDashboard() {
         isOpen={showPaymentPortal}
         onClose={() => setShowPaymentPortal(false)}
         cartItems={cartItems}
-        userId={user?.id || 0}
+        onCartChanged={fetchCart}
         onPaymentSuccess={() => {
-          fetchCart(user?.id || 0);
-          fetchOrders(user?.id || 0);
+          fetchCart();
+          if (user) fetchOrders(user.id);
           setShowPaymentPortal(false);
         }}
       />

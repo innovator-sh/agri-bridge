@@ -67,8 +67,8 @@ export default function SubsidiesPrograms() {
   };
 
   const handleLinkClick = (link: string, title: string) => {
-    // Track click for analytics if needed
-    console.log(`Opening scheme: ${title}`);
+    // Only open http(s) links
+    if (!/^https?:\/\//i.test(link)) return;
     window.open(link, '_blank', 'noopener,noreferrer');
   };
 

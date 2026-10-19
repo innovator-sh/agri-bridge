@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { fetchAllPages } from '@/lib/utils/fetchAll';
 import { Bell, Package, Calendar, Users, Send, AlertCircle, CheckCircle, Clock, Repeat, X } from 'lucide-react';
 
 interface OrderRequest {
@@ -29,6 +30,7 @@ interface OrderApplication {
 }
 
 interface FarmerOrderRequestsProps {
+  /** Current user's id from the session; used only to highlight their own applications. */
   userId: number;
 }
 
@@ -51,14 +53,8 @@ export default function FarmerOrderRequests({ userId }: FarmerOrderRequestsProps
   const fetchOrderRequests = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`/api/order-requests?farmer_id=${userId}`);
-      const data = await response.json();
-      
-      if (response.ok) {
-        setOrderRequests(data.orderRequests || []);
-      } else {
-        console.error('Failed to fetch order requests:', data.error);
-      }
+      const requests = await fetchAllPages<OrderRequest>('/api/order-requests', 'orderRequests');
+      setOrderRequests(requests);
     } catch (error) {
       console.error('Error fetching order requests:', error);
     } finally {
@@ -79,7 +75,6 @@ export default function FarmerOrderRequests({ userId }: FarmerOrderRequestsProps
         },
         body: JSON.stringify({
           order_request_id: orderRequestId,
-          farmer_id: userId,
           price_per_unit: parseFloat(applicationData.price_per_unit),
           available_quantity: parseInt(applicationData.available_quantity),
           delivery_date: applicationData.delivery_date || null,

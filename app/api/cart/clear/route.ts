@@ -1,41 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import supabase from '@/lib/supabase';
+import { route } from '@/lib/api/handler';
+import { HttpError } from '@/lib/api/errors';
+import { requireRole, uid } from '@/lib/auth/require';
 
-// POST - Clear user's cart
-export async function POST(request: NextRequest) {
-  try {
-    const { userId } = await request.json();
+// POST - clear the session user's cart (any body is ignored)
+export const POST = route(async () => {
+  const me = uid(await requireRole('buyer'));
 
-    if (!userId) {
-      return NextResponse.json(
-        { error: 'User ID is required' },
-        { status: 400 }
-      );
-    }
-
-    const { error } = await supabase
-      .from('cart')
-      .update({ items: [] })
-      .eq('user_id', userId);
-
-    if (error) {
-      console.error('Cart clear error:', error);
-      return NextResponse.json(
-        { error: 'Failed to clear cart' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      message: 'Cart cleared successfully'
-    });
-
-  } catch (error) {
-    console.error('Cart clear API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const { error } = await supabase.from('cart_items').delete().eq('user_id', me);
+  if (error) {
+    console.error('[cart] clear failed', error);
+    throw new HttpError(500, 'Failed to clear cart');
   }
-}
+
+  return NextResponse.json({ success: true, message: 'Cart cleared successfully' });
+});

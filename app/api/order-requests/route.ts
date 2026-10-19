@@ -1,161 +1,114 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError } from '@/lib/api/errors';
+import { requireUser, requireRole, uid } from '@/lib/auth/require';
+import { rateLimit } from '@/lib/rate-limit';
+import { createOrderRequestSchema, pagination, todayIso } from '@/lib/validation/orderRequests';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { 
-      buyer_id, 
-      product_name, 
-      quantity, 
-      by_date, 
-      allow_multiple_farmers, 
-      description,
-      max_price_per_unit,
-      is_scheduled,
-      schedule_id
-    } = body;
+export const POST = route(async (req) => {
+  const session = await requireRole('buyer');
+  rateLimit(`order-requests:${uid(session)}`, 30, 60 * 60_000);
+  const input = await parseJson(req, createOrderRequestSchema);
 
-    // Validate required fields
-    if (!buyer_id || !product_name || !quantity || !by_date) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
+  const { data, error } = await supabase
+    .from('order_requests')
+    .insert({
+      buyer_id: uid(session),
+      product_name: input.product_name,
+      quantity: input.quantity,
+      by_date: input.by_date,
+      allow_multiple_farmers: input.allow_multiple_farmers,
+      description: input.description,
+      max_price_per_unit: input.max_price_per_unit ?? null,
+      status: 'open',
+      // Scheduled requests are only created by the cron job, never by clients.
+      is_scheduled: false,
+      schedule_id: null,
+    })
+    .select()
+    .single();
 
-    // Insert order request
-    const { data, error } = await supabase
+  if (error) {
+    console.error('Order request creation error:', error);
+    throw new HttpError(500, 'Failed to create order request');
+  }
+
+  return NextResponse.json({ success: true, orderRequest: data });
+});
+
+/** Buyers see their own requests; farmers see open requests they can apply to. */
+export const GET = route(async (req) => {
+  const session = await requireUser();
+  const { limit, offset } = pagination.parse(Object.fromEntries(new URL(req.url).searchParams));
+
+  if (session.role === 'buyer') {
+    const { data, error, count } = await supabase
       .from('order_requests')
-      .insert({
-        buyer_id,
-        product_name,
-        quantity,
-        by_date,
-        allow_multiple_farmers: allow_multiple_farmers || false,
-        description: description || '',
-        max_price_per_unit: max_price_per_unit || null,
-        status: 'open',
-        is_scheduled: is_scheduled || false,
-        schedule_id: schedule_id || null,
-        created_at: new Date().toISOString()
-      })
-      .select()
-      .single();
+      .select(
+        `
+        *,
+        order_applications (
+          id,
+          farmer_id,
+          price_per_unit,
+          available_quantity,
+          delivery_date,
+          notes,
+          status,
+          users!farmer_id (name, phone_number)
+        )
+      `,
+        { count: 'exact' }
+      )
+      .eq('buyer_id', uid(session))
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to create order request' },
-        { status: 500 }
-      );
+      console.error('Order requests fetch error:', error);
+      throw new HttpError(500, 'Failed to fetch order requests');
     }
-
-    return NextResponse.json({ 
-      success: true, 
-      orderRequest: data 
-    });
-
-  } catch (error) {
-    console.error('Order request API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ orderRequests: data ?? [], total: count ?? data?.length ?? 0, limit, offset });
   }
-}
 
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const buyer_id = searchParams.get('buyer_id');
-    const farmer_id = searchParams.get('farmer_id');
+  const { data, error, count } = await supabase
+    .from('order_requests')
+    .select(
+      `
+      id,
+      buyer_id,
+      product_name,
+      quantity,
+      by_date,
+      allow_multiple_farmers,
+      description,
+      max_price_per_unit,
+      status,
+      created_at,
+      is_scheduled,
+      schedule_id,
+      users!buyer_id (name, phone_number),
+      order_applications!left (
+        id,
+        farmer_id,
+        status
+      )
+    `,
+      { count: 'exact' }
+    )
+    .eq('status', 'open')
+    .gte('by_date', todayIso())
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
 
-    if (buyer_id) {
-      // Get order requests created by this buyer
-      const { data, error } = await supabase
-        .from('order_requests')
-        .select(`
-          *,
-          order_applications (
-            id,
-            farmer_id,
-            price_per_unit,
-            available_quantity,
-            delivery_date,
-            notes,
-            status,
-            users!farmer_id (name, phone_number)
-          )
-        `)
-        .eq('buyer_id', buyer_id)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Database error:', error);
-        return NextResponse.json(
-          { error: 'Failed to fetch order requests' },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({ orderRequests: data });
-    }
-
-    if (farmer_id) {
-      // Get open order requests for farmers to apply to
-      const { data, error } = await supabase
-        .from('order_requests')
-        .select(`
-          id,
-          buyer_id,
-          product_name,
-          quantity,
-          by_date,
-          allow_multiple_farmers,
-          description,
-          max_price_per_unit,
-          status,
-          created_at,
-          is_scheduled,
-          schedule_id,
-          users!buyer_id (name, phone_number),
-          order_applications!left (
-            id,
-            farmer_id,
-            status
-          )
-        `)
-        .eq('status', 'open')
-        .gte('by_date', new Date().toISOString().split('T')[0])
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Database error:', error);
-        return NextResponse.json(
-          { error: 'Failed to fetch order requests' },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({ orderRequests: data });
-    }
-
-    return NextResponse.json(
-      { error: 'Missing buyer_id or farmer_id parameter' },
-      { status: 400 }
-    );
-
-  } catch (error) {
-    console.error('Order request GET API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (error) {
+    console.error('Order requests fetch error:', error);
+    throw new HttpError(500, 'Failed to fetch order requests');
   }
-}
+  return NextResponse.json({ orderRequests: data ?? [], total: count ?? data?.length ?? 0, limit, offset });
+});

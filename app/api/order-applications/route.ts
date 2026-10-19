@@ -1,221 +1,135 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError, badRequest, forbidden, notFound } from '@/lib/api/errors';
+import { requireRole, uid } from '@/lib/auth/require';
+import {
+  APPLICATION_TRANSITIONS,
+  createApplicationSchema,
+  todayIso,
+  updateApplicationSchema,
+} from '@/lib/validation/orderRequests';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { 
-      order_request_id, 
-      farmer_id, 
-      price_per_unit, 
-      available_quantity,
-      delivery_date,
-      notes 
-    } = body;
+/** Farmers apply to open order requests; the applicant is always the session user. */
+export const POST = route(async (req) => {
+  const session = await requireRole('farmer');
+  const farmerId = uid(session);
+  const input = await parseJson(req, createApplicationSchema);
 
-    // Validate required fields
-    if (!order_request_id || !farmer_id || !price_per_unit || !available_quantity) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
+  const { data: orderRequest, error: orderError } = await supabase
+    .from('order_requests')
+    .select('allow_multiple_farmers, status, by_date')
+    .eq('id', input.order_request_id)
+    .maybeSingle();
+  if (orderError) {
+    console.error('Order request lookup error:', orderError);
+    throw new HttpError(500, 'Failed to submit application');
+  }
+  if (!orderRequest) throw notFound('Order request');
+  if (orderRequest.status !== 'open' || String(orderRequest.by_date) < todayIso()) {
+    throw badRequest('This order request is no longer open');
+  }
 
-    // Check if farmer already applied to this order request
-    const { data: existingApplication } = await supabase
-      .from('order_applications')
-      .select('id')
-      .eq('order_request_id', order_request_id)
-      .eq('farmer_id', farmer_id)
-      .single();
+  const { data: existing, error: existingError } = await supabase
+    .from('order_applications')
+    .select('farmer_id')
+    .eq('order_request_id', input.order_request_id);
+  if (existingError) {
+    console.error('Applications lookup error:', existingError);
+    throw new HttpError(500, 'Failed to submit application');
+  }
+  if (existing?.some((a) => Number(a.farmer_id) === farmerId)) {
+    throw badRequest('You have already applied to this order request');
+  }
+  if (!orderRequest.allow_multiple_farmers && existing && existing.length > 0) {
+    throw badRequest('This order request only allows one farmer application');
+  }
 
-    if (existingApplication) {
-      return NextResponse.json(
-        { error: 'You have already applied to this order request' },
-        { status: 400 }
-      );
-    }
+  const { data, error } = await supabase
+    .from('order_applications')
+    .insert({
+      order_request_id: input.order_request_id,
+      farmer_id: farmerId,
+      price_per_unit: input.price_per_unit,
+      available_quantity: input.available_quantity,
+      delivery_date: input.delivery_date ?? null,
+      notes: input.notes,
+      status: 'pending',
+    })
+    .select()
+    .single();
 
-    // Get order request details to check if multiple farmers are allowed
-    const { data: orderRequest, error: orderError } = await supabase
-      .from('order_requests')
-      .select('allow_multiple_farmers, status')
-      .eq('id', order_request_id)
-      .single();
+  if (error) {
+    // 23505 = unique(order_request_id, farmer_id): lost a race with a duplicate submit.
+    if (error.code === '23505') throw badRequest('You have already applied to this order request');
+    console.error('Application creation error:', error);
+    throw new HttpError(500, 'Failed to submit application');
+  }
 
-    if (orderError || !orderRequest) {
-      return NextResponse.json(
-        { error: 'Order request not found' },
-        { status: 404 }
-      );
-    }
+  return NextResponse.json({ success: true, application: data });
+});
 
-    if (orderRequest.status !== 'open') {
-      return NextResponse.json(
-        { error: 'This order request is no longer open' },
-        { status: 400 }
-      );
-    }
+/** The buyer who owns the order request accepts or rejects a pending application. */
+export const PUT = route(async (req) => {
+  const session = await requireRole('buyer');
+  const { application_id, status } = await parseJson(req, updateApplicationSchema);
 
-    // If multiple farmers are not allowed, check if someone already applied
-    if (!orderRequest.allow_multiple_farmers) {
-      const { data: existingApps } = await supabase
-        .from('order_applications')
-        .select('id')
-        .eq('order_request_id', order_request_id);
+  const { data: application, error: appError } = await supabase
+    .from('order_applications')
+    .select('id, status, order_request_id, order_requests!inner (buyer_id, status)')
+    .eq('id', application_id)
+    .maybeSingle();
+  if (appError) {
+    console.error('Application lookup error:', appError);
+    throw new HttpError(500, 'Failed to update application');
+  }
+  if (!application) throw notFound('Application');
 
-      if (existingApps && existingApps.length > 0) {
-        return NextResponse.json(
-          { error: 'This order request only allows one farmer application' },
-          { status: 400 }
-        );
+  const request = application.order_requests as unknown as { buyer_id: number; status: string };
+  if (Number(request.buyer_id) !== uid(session)) throw forbidden();
+
+  if (!APPLICATION_TRANSITIONS[application.status as string]?.includes(status)) {
+    throw badRequest(`Cannot change an application from ${application.status} to ${status}`);
+  }
+  if (status === 'accepted' && request.status !== 'open') {
+    throw badRequest('This order request is no longer open');
+  }
+
+  const { data, error } = await supabase
+    .from('order_applications')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', application_id)
+    .eq('status', 'pending')
+    .select()
+    .single();
+  if (error || !data) {
+    console.error('Application update error:', error);
+    throw new HttpError(500, 'Failed to update application');
+  }
+
+  if (status === 'accepted') {
+    const [{ data: accepted }, { data: orderRequest }] = await Promise.all([
+      supabase.from('order_applications').select('available_quantity').eq('order_request_id', application.order_request_id).eq('status', 'accepted'),
+      supabase.from('order_requests').select('quantity, allow_multiple_farmers').eq('id', application.order_request_id).maybeSingle(),
+    ]);
+
+    if (orderRequest && accepted) {
+      // `accepted` already includes the application updated above.
+      const totalAccepted = accepted.reduce((sum, a) => sum + Number(a.available_quantity), 0);
+      if (!orderRequest.allow_multiple_farmers || totalAccepted >= Number(orderRequest.quantity)) {
+        const { error: closeError } = await supabase
+          .from('order_requests')
+          .update({ status: 'closed', updated_at: new Date().toISOString() })
+          .eq('id', application.order_request_id)
+          .eq('buyer_id', uid(session));
+        if (closeError) console.error('Order request close error:', closeError);
       }
     }
-
-    // Insert order application
-    const { data, error } = await supabase
-      .from('order_applications')
-      .insert({
-        order_request_id,
-        farmer_id,
-        price_per_unit,
-        available_quantity,
-        delivery_date: delivery_date || null,
-        notes: notes || '',
-        status: 'pending',
-        created_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to submit application' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      application: data 
-    });
-
-  } catch (error) {
-    console.error('Order application API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
   }
-}
 
-export async function PUT(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { application_id, status, buyer_id } = body;
-
-    // Validate required fields
-    if (!application_id || !status || !buyer_id) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
-
-    // Verify buyer owns this order request
-    const { data: application, error: appError } = await supabase
-      .from('order_applications')
-      .select(`
-        *,
-        order_requests!inner (buyer_id)
-      `)
-      .eq('id', application_id)
-      .single();
-
-    if (appError || !application) {
-      return NextResponse.json(
-        { error: 'Application not found' },
-        { status: 404 }
-      );
-    }
-
-    if (application.order_requests.buyer_id !== buyer_id) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 403 }
-      );
-    }
-
-    // Update application status
-    const { data, error } = await supabase
-      .from('order_applications')
-      .update({ 
-        status,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', application_id)
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to update application' },
-        { status: 500 }
-      );
-    }
-
-    // If accepted, check if order should be closed
-    if (status === 'accepted') {
-      // Get all accepted applications for this order request
-      const { data: allApplications } = await supabase
-        .from('order_applications')
-        .select('available_quantity')
-        .eq('order_request_id', application.order_request_id)
-        .eq('status', 'accepted');
-
-      // Get the order request details
-      const { data: orderRequest } = await supabase
-        .from('order_requests')
-        .select('quantity, allow_multiple_farmers')
-        .eq('id', application.order_request_id)
-        .single();
-
-      if (orderRequest && allApplications) {
-        // Calculate total accepted quantity (including the current one)
-        const totalAccepted = allApplications.reduce((sum, app) => sum + app.available_quantity, 0) + data.available_quantity;
-        
-        // Close order if:
-        // 1. Multiple farmers not allowed (existing logic), OR
-        // 2. Total accepted quantity meets or exceeds requested quantity
-        if (!orderRequest.allow_multiple_farmers || totalAccepted >= orderRequest.quantity) {
-          await supabase
-            .from('order_requests')
-            .update({ 
-              status: 'closed',
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', application.order_request_id);
-        }
-      }
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      application: data 
-    });
-
-  } catch (error) {
-    console.error('Order application update API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
-  }
-}
+  return NextResponse.json({ success: true, application: data });
+});

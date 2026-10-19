@@ -1,344 +1,139 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import supabaseClient from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError, badRequest, forbidden, notFound } from '@/lib/api/errors';
+import { requireRole, uid } from '@/lib/auth/require';
+import {
+  createScheduleSchema,
+  firstExecutionDate,
+  pagination,
+  scheduleIdQuery,
+  updateScheduleSchema,
+  validateScheduleDay,
+  type ScheduleType,
+} from '@/lib/validation/orderRequests';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Untyped view of the service-role client (no generated DB types in this project).
+const supabase = supabaseClient as unknown as SupabaseClient<any, 'public', any>;
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { 
-      buyer_id, 
-      product_name, 
-      quantity, 
-      allow_multiple_farmers, 
-      description,
-      max_price_per_unit,
-      schedule_type,
-      schedule_day,
-      days_before_needed
-    } = body;
+export const POST = route(async (req) => {
+  const session = await requireRole('buyer');
+  const input = await parseJson(req, createScheduleSchema);
 
-    // Validate required fields
-    if (!buyer_id || !product_name || !quantity || !schedule_type) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
+  const dayError = validateScheduleDay(input.schedule_type, input.schedule_day);
+  if (dayError) throw badRequest(dayError);
+  const day = input.schedule_type === 'daily' ? null : input.schedule_day ?? null;
 
-    // Calculate next execution date based on schedule type
-    let nextExecutionDate = new Date();
-    
-    if (schedule_type === 'monthly') {
-      if (!schedule_day || schedule_day < 1 || schedule_day > 31) {
-        return NextResponse.json(
-          { error: 'Invalid schedule_day for monthly schedule (must be 1-31)' },
-          { status: 400 }
-        );
-      }
-      
-      // Set to next occurrence of the specified day
-      const currentDate = new Date();
-      const targetDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), schedule_day);
-      
-      // If the target date has passed this month, move to next month
-      if (targetDate <= currentDate) {
-        targetDate.setMonth(targetDate.getMonth() + 1);
-      }
-      
-      nextExecutionDate = targetDate;
-    } else if (schedule_type === 'weekly') {
-      if (schedule_day === null || schedule_day < 0 || schedule_day > 6) {
-        return NextResponse.json(
-          { error: 'Invalid schedule_day for weekly schedule (must be 0-6, where 0=Sunday)' },
-          { status: 400 }
-        );
-      }
-      
-      // Set to next occurrence of the specified day of week
-      const currentDate = new Date();
-      const daysUntilTarget = (schedule_day - currentDate.getDay() + 7) % 7;
-      nextExecutionDate.setDate(currentDate.getDate() + (daysUntilTarget || 7));
-    } else if (schedule_type === 'daily') {
-      // Set to tomorrow
-      nextExecutionDate.setDate(nextExecutionDate.getDate() + 1);
-    }
+  const { data, error } = await supabase
+    .from('order_schedules')
+    .insert({
+      buyer_id: uid(session),
+      product_name: input.product_name,
+      quantity: input.quantity,
+      allow_multiple_farmers: input.allow_multiple_farmers,
+      description: input.description,
+      max_price_per_unit: input.max_price_per_unit ?? null,
+      schedule_type: input.schedule_type,
+      schedule_day: day,
+      days_before_needed: input.days_before_needed,
+      is_active: true,
+      next_execution_date: firstExecutionDate(input.schedule_type, day),
+    })
+    .select()
+    .single();
 
-    // Insert order schedule
-    const { data, error } = await supabase
-      .from('order_schedules')
-      .insert({
-        buyer_id,
-        product_name,
-        quantity,
-        allow_multiple_farmers: allow_multiple_farmers || false,
-        description: description || '',
-        max_price_per_unit: max_price_per_unit || null,
-        schedule_type,
-        schedule_day: schedule_day || null,
-        days_before_needed: days_before_needed || 7,
-        is_active: true,
-        next_execution_date: nextExecutionDate.toISOString().split('T')[0],
-        created_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to create order schedule' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      schedule: data 
-    });
-
-  } catch (error) {
-    console.error('Order schedule API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (error) {
+    console.error('Order schedule creation error:', error);
+    throw new HttpError(500, 'Failed to create order schedule');
   }
+
+  return NextResponse.json({ success: true, schedule: data });
+});
+
+export const GET = route(async (req) => {
+  const session = await requireRole('buyer');
+  const { limit, offset } = pagination.parse(Object.fromEntries(new URL(req.url).searchParams));
+
+  const { data, error, count } = await supabase
+    .from('order_schedules')
+    .select('*', { count: 'exact' })
+    .eq('buyer_id', uid(session))
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) {
+    console.error('Order schedules fetch error:', error);
+    throw new HttpError(500, 'Failed to fetch order schedules');
+  }
+
+  return NextResponse.json({ schedules: data ?? [], total: count ?? data?.length ?? 0, limit, offset });
+});
+
+type ScheduleRow = { buyer_id: number; schedule_type: ScheduleType; schedule_day: number | null };
+
+async function loadOwnedSchedule(scheduleId: number, userId: number): Promise<ScheduleRow> {
+  const { data, error } = await supabase
+    .from('order_schedules')
+    .select('buyer_id, schedule_type, schedule_day')
+    .eq('id', scheduleId)
+    .maybeSingle();
+  if (error) {
+    console.error('Order schedule lookup error:', error);
+    throw new HttpError(500, 'Failed to load schedule');
+  }
+  if (!data) throw notFound('Schedule');
+  if (Number(data.buyer_id) !== userId) throw forbidden();
+  return data as unknown as ScheduleRow;
 }
 
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const buyer_id = searchParams.get('buyer_id');
+export const PUT = route(async (req) => {
+  const session = await requireRole('buyer');
+  const { schedule_id, ...input } = await parseJson(req, updateScheduleSchema);
+  const existing = await loadOwnedSchedule(schedule_id, uid(session));
 
-    if (!buyer_id) {
-      return NextResponse.json(
-        { error: 'Missing buyer_id parameter' },
-        { status: 400 }
-      );
-    }
+  const update: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input)) if (v !== undefined) update[k] = v;
 
-    // Get schedules for this buyer
-    const { data, error } = await supabase
-      .from('order_schedules')
-      .select('*')
-      .eq('buyer_id', buyer_id)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch order schedules' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ schedules: data });
-
-  } catch (error) {
-    console.error('Order schedule GET API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  // Changing the type or day re-derives the next run date.
+  if (input.schedule_type !== undefined || input.schedule_day !== undefined) {
+    const type = input.schedule_type ?? existing.schedule_type;
+    const day = type === 'daily' ? null : input.schedule_day !== undefined ? input.schedule_day : existing.schedule_day;
+    const dayError = validateScheduleDay(type, day);
+    if (dayError) throw badRequest(dayError);
+    update.schedule_type = type;
+    update.schedule_day = day;
+    update.next_execution_date = firstExecutionDate(type, day);
   }
-}
 
-export async function PUT(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { 
-      schedule_id, 
-      buyer_id, 
-      is_active,
-      product_name,
-      quantity,
-      allow_multiple_farmers,
-      description,
-      max_price_per_unit,
-      schedule_type,
-      schedule_day,
-      days_before_needed
-    } = body;
+  if (Object.keys(update).length === 0) throw badRequest('No fields to update');
+  update.updated_at = new Date().toISOString();
 
-    // Validate required fields
-    if (!schedule_id || !buyer_id) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
-
-    // Verify buyer owns this schedule
-    const { data: schedule, error: scheduleError } = await supabase
-      .from('order_schedules')
-      .select('buyer_id')
-      .eq('id', schedule_id)
-      .single();
-
-    if (scheduleError || !schedule) {
-      return NextResponse.json(
-        { error: 'Schedule not found' },
-        { status: 404 }
-      );
-    }
-
-    if (schedule.buyer_id !== buyer_id) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 403 }
-      );
-    }
-
-    // Build update object
-    const updateData: any = {
-      updated_at: new Date().toISOString()
-    };
-
-    // If only updating is_active (pause/activate)
-    if (is_active !== undefined && !product_name) {
-      updateData.is_active = is_active;
-    } else {
-      // Full schedule update
-      if (product_name) updateData.product_name = product_name;
-      if (quantity) updateData.quantity = quantity;
-      if (allow_multiple_farmers !== undefined) updateData.allow_multiple_farmers = allow_multiple_farmers;
-      if (description !== undefined) updateData.description = description;
-      if (max_price_per_unit !== undefined) updateData.max_price_per_unit = max_price_per_unit;
-      if (schedule_type) updateData.schedule_type = schedule_type;
-      if (schedule_day !== undefined) updateData.schedule_day = schedule_day;
-      if (days_before_needed) updateData.days_before_needed = days_before_needed;
-
-      // Recalculate next execution date if schedule details changed
-      if (schedule_type) {
-        let nextExecutionDate = new Date();
-        
-        if (schedule_type === 'monthly') {
-          if (!schedule_day || schedule_day < 1 || schedule_day > 31) {
-            return NextResponse.json(
-              { error: 'Invalid schedule_day for monthly schedule (must be 1-31)' },
-              { status: 400 }
-            );
-          }
-          
-          const currentDate = new Date();
-          const targetDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), schedule_day);
-          
-          if (targetDate <= currentDate) {
-            targetDate.setMonth(targetDate.getMonth() + 1);
-          }
-          
-          nextExecutionDate = targetDate;
-        } else if (schedule_type === 'weekly') {
-          if (schedule_day === null || schedule_day < 0 || schedule_day > 6) {
-            return NextResponse.json(
-              { error: 'Invalid schedule_day for weekly schedule (must be 0-6, where 0=Sunday)' },
-              { status: 400 }
-            );
-          }
-          
-          const currentDate = new Date();
-          const daysUntilTarget = (schedule_day - currentDate.getDay() + 7) % 7;
-          nextExecutionDate.setDate(currentDate.getDate() + (daysUntilTarget || 7));
-        } else if (schedule_type === 'daily') {
-          nextExecutionDate.setDate(nextExecutionDate.getDate() + 1);
-        }
-
-        updateData.next_execution_date = nextExecutionDate.toISOString().split('T')[0];
-      }
-    }
-
-    // Update schedule
-    const { data, error } = await supabase
-      .from('order_schedules')
-      .update(updateData)
-      .eq('id', schedule_id)
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to update schedule' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      schedule: data 
-    });
-
-  } catch (error) {
-    console.error('Order schedule update API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const { data, error } = await supabase
+    .from('order_schedules')
+    .update(update)
+    .eq('id', schedule_id)
+    .eq('buyer_id', uid(session))
+    .select()
+    .single();
+  if (error) {
+    console.error('Order schedule update error:', error);
+    throw new HttpError(500, 'Failed to update schedule');
   }
-}
 
-export async function DELETE(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const schedule_id = searchParams.get('schedule_id');
-    const buyer_id = searchParams.get('buyer_id');
+  return NextResponse.json({ success: true, schedule: data });
+});
 
-    if (!schedule_id || !buyer_id) {
-      return NextResponse.json(
-        { error: 'Missing required parameters' },
-        { status: 400 }
-      );
-    }
+export const DELETE = route(async (req) => {
+  const session = await requireRole('buyer');
+  const { schedule_id } = scheduleIdQuery.parse(Object.fromEntries(new URL(req.url).searchParams));
+  await loadOwnedSchedule(schedule_id, uid(session));
 
-    // Verify buyer owns this schedule
-    const { data: schedule, error: scheduleError } = await supabase
-      .from('order_schedules')
-      .select('buyer_id')
-      .eq('id', schedule_id)
-      .single();
-
-    if (scheduleError || !schedule) {
-      return NextResponse.json(
-        { error: 'Schedule not found' },
-        { status: 404 }
-      );
-    }
-
-    if (schedule.buyer_id !== parseInt(buyer_id)) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 403 }
-      );
-    }
-
-    // Delete schedule
-    const { error } = await supabase
-      .from('order_schedules')
-      .delete()
-      .eq('id', schedule_id);
-
-    if (error) {
-      console.error('Database error:', error);
-      return NextResponse.json(
-        { error: 'Failed to delete schedule' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      message: 'Schedule deleted successfully' 
-    });
-
-  } catch (error) {
-    console.error('Order schedule delete API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  const { error } = await supabase.from('order_schedules').delete().eq('id', schedule_id).eq('buyer_id', uid(session));
+  if (error) {
+    console.error('Order schedule delete error:', error);
+    throw new HttpError(500, 'Failed to delete schedule');
   }
-}
+
+  return NextResponse.json({ success: true, message: 'Schedule deleted successfully' });
+});

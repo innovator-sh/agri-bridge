@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useI18n } from '@/lib/i18n/context';
+import { useSession } from '@/lib/hooks/useSession';
+import { fetchAllPages, fetchRatingsForOrders } from '@/lib/utils/fetchAll';
 import { 
   BarChart3, 
   Wheat, 
@@ -37,14 +39,6 @@ import Dashboard from '@/components/Dashboard';
 import { usePricePrediction } from '@/lib/hooks/usePricePrediction';
 import { matchState, getStateSuggestions } from '@/lib/utils/state-matcher';
 
-interface User {
-  id: number;
-  name: string;
-  email: string;
-  phone_number: string;
-  role: string;
-}
-
 interface Product {
   id: number;
   name: string;
@@ -63,7 +57,8 @@ interface Product {
 export default function FarmerDashboard() {
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [user, setUser] = useState<User | null>(null);
+  const router = useRouter();
+  const { user, loading: sessionLoading, logout } = useSession();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([]);
@@ -88,17 +83,21 @@ export default function FarmerDashboard() {
   // Price prediction hook
   const { prediction, loading: priceLoading, error: priceError, searchPrices } = usePricePrediction();
 
+  // Session gate: redirect unauthenticated users / wrong role, then load data
   useEffect(() => {
-    // Get user from localStorage
-    const userData = localStorage.getItem('user');
-    if (userData) {
-      const parsedUser = JSON.parse(userData);
-      setUser(parsedUser);
-      fetchProducts(parsedUser.id);
-      fetchOrders(parsedUser.id);
-      fetchReceivedRatings(parsedUser.id);
-      fetchUserStats(parsedUser.id);
+    if (sessionLoading) return;
+    if (!user) {
+      router.replace('/login');
+      return;
     }
+    if (user.role !== 'farmer') {
+      router.replace('/dashboard/buyer');
+      return;
+    }
+    fetchProducts(user.id);
+    fetchOrders(user.id);
+    fetchReceivedRatings(user.id);
+    fetchUserStats();
 
     // Get user location for state-based price prediction
     if (navigator.geolocation) {
@@ -144,15 +143,14 @@ export default function FarmerDashboard() {
         { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
       );
     }
-  }, []);
+  }, [sessionLoading, user?.id, user?.role]);
 
   const fetchProducts = async (sellerId: number) => {
     try {
-      const response = await fetch(`/api/products?seller_id=${sellerId}`);
-      const data = await response.json();
+      const productsData = await fetchAllPages<any>(`/api/products?seller_id=${sellerId}&status=all`, 'products');
       
       // Add seller phone to each product for ProductDetails component
-      const productsWithPhone = (data.products || []).map((product: any) => ({
+      const productsWithPhone = productsData.map((product: any) => ({
         ...product,
         seller_phone: user?.phone_number || 'Not provided'
       }));
@@ -165,26 +163,22 @@ export default function FarmerDashboard() {
     }
   };
 
-  const fetchOrders = async (sellerId: number) => {
+  const fetchOrders = async (currentUserId: number) => {
     try {
-      const response = await fetch(`/api/orders?userId=${sellerId}&userType=seller`);
-      const data = await response.json();
-      const ordersData = data.orders || [];
+      const ordersData = await fetchAllPages<any>('/api/orders?role=seller', 'orders');
       setOrders(ordersData);
       
-      // Fetch ratings for each order
+      // Fetch ratings for all orders in batched requests
       const ratingsMap: {[key: number]: any} = {};
-      for (const order of ordersData) {
-        try {
-          const ratingsResponse = await fetch(`/api/ratings?orderId=${order.id}`);
-          const ratingsData = await ratingsResponse.json();
-          const sellerRating = ratingsData.ratings?.find((r: any) => r.rater_id === sellerId);
-          if (sellerRating) {
-            ratingsMap[order.id] = sellerRating;
+      try {
+        const allRatings = await fetchRatingsForOrders(ordersData.map((o: any) => o.id));
+        for (const r of allRatings) {
+          if (r.rater_id === currentUserId) {
+            ratingsMap[r.order_id] = r;
           }
-        } catch (error) {
-          console.error(`Error fetching ratings for order ${order.id}:`, error);
         }
+      } catch (error) {
+        console.error('Error fetching ratings for orders:', error);
       }
       setOrderRatings(ratingsMap);
     } catch (error) {
@@ -192,9 +186,9 @@ export default function FarmerDashboard() {
     }
   };
 
-  const fetchReceivedRatings = async (userId: number) => {
+  const fetchReceivedRatings = async (currentUserId: number) => {
     try {
-      const response = await fetch(`/api/ratings?userId=${userId}&userType=seller`);
+      const response = await fetch(`/api/ratings?userId=${currentUserId}&userType=seller`);
       const data = await response.json();
       setReceivedRatings(data.ratings || []);
     } catch (error) {
@@ -202,10 +196,10 @@ export default function FarmerDashboard() {
     }
   };
 
-  const fetchUserStats = async (userId: number) => {
+  const fetchUserStats = async () => {
     setStatsLoading(true);
     try {
-      const response = await fetch(`/api/user-stats?userId=${userId}&userType=seller`);
+      const response = await fetch('/api/user-stats?userType=seller');
       const data = await response.json();
       setUserStats(data);
     } catch (error) {
@@ -236,7 +230,6 @@ export default function FarmerDashboard() {
       name: formData.get('name'),
       category: formData.get('category'),
       quantity: parseInt(formData.get('quantity') as string),
-      seller_id: user.id,
       price_single: parseFloat(formData.get('price_single') as string),
       price_multiple: parseFloat(formData.get('price_multiple') as string),
       location: formData.get('location'),
@@ -264,7 +257,6 @@ export default function FarmerDashboard() {
             // Create FormData for server-side upload
             const photoFormData = new FormData();
             photoFormData.append('file', file);
-            photoFormData.append('userId', user.id.toString());
             photoFormData.append('productId', productId.toString());
 
             // Upload via API route
@@ -412,12 +404,9 @@ export default function FarmerDashboard() {
       const existingRating = orderRatings[selectedOrderForRating.id];
       const method = existingRating ? 'PUT' : 'POST';
       const body = existingRating 
-        ? { ratingId: existingRating.id, raterId: user.id, rating, review }
+        ? { ratingId: existingRating.id, rating, review }
         : {
             orderId: selectedOrderForRating.id,
-            raterId: user.id,
-            ratedId: selectedOrderForRating.buyer.id,
-            raterType: 'seller',
             rating,
             review
           };
@@ -437,23 +426,21 @@ export default function FarmerDashboard() {
         }));
         alert(existingRating ? 'Rating updated successfully!' : 'Rating submitted successfully!');
       } else {
-        // Check if it's a table missing error
-        if (result.error?.includes('Ratings table does not exist')) {
-          const shouldSetup = confirm(
-            'The ratings table needs to be created first. Would you like to go to the setup page?'
-          );
-          if (shouldSetup) {
-            window.open('/setup', '_blank');
-          }
-        } else {
-          alert(result.error || 'Failed to submit rating');
-        }
+        alert(result.error || 'Failed to submit rating');
       }
     } catch (error) {
       console.error('Error submitting rating:', error);
       alert('Error submitting rating. Please check your connection and try again.');
     }
   };
+
+  if (sessionLoading || !user || user.role !== 'farmer') {
+    return (
+      <div className="min-h-screen bg-green-50 flex items-center justify-center">
+        <div className="text-gray-500">{t('messages.loadingProducts')}</div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-green-50">
@@ -474,9 +461,9 @@ export default function FarmerDashboard() {
             <div className="flex items-center space-x-4">
               <LanguageSwitcher />
               <span className="text-sm text-gray-600">{t('farmer.welcome')}, {user?.name}</span>
-              <Link href="/" className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
+              <button onClick={logout} className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
                 Logout
-              </Link>
+              </button>
             </div>
           </div>
           
@@ -492,9 +479,9 @@ export default function FarmerDashboard() {
               </div>
               <div className="flex items-center space-x-2">
                 <LanguageSwitcher />
-                <Link href="/" className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
+                <button onClick={logout} className="text-sm text-white hover:text-gray-700  px-4 py-1 bg-red-400 rounded-lg">
                   Logout
-                </Link>
+                </button>
               </div>
             </div>
             <div className="text-center">
@@ -780,7 +767,6 @@ export default function FarmerDashboard() {
                           const inputValue = e.target.value;
                           setLocationState(inputValue);
                           
-                          console.log('🏛️ State input changed:', inputValue);
                           
                           // Get suggestions for dropdown
                           if (inputValue.length > 0) {
@@ -795,19 +781,11 @@ export default function FarmerDashboard() {
                           const matchedState = matchState(inputValue);
                           const stateToUse = matchedState || inputValue || userLocation?.state;
                           
-                          console.log('🧠 Smart state matching:', {
-                            input: inputValue,
-                            matched: matchedState,
-                            using: stateToUse,
-                            productName: productName
-                          });
                           
                           // Trigger price prediction update when state changes
                           if (productName) {
-                            console.log('🚀 Triggering price search with:', { productName, stateToUse });
                             searchPrices(productName, stateToUse);
                           } else {
-                            console.log('⚠️ No product name, skipping price search');
                           }
                         }}
                         onFocus={() => {
@@ -871,10 +849,8 @@ export default function FarmerDashboard() {
                         productName={productName}
                         stateName={matchState(locationState) || locationState || userLocation?.state}
                         onReload={() => {
-                          console.log('🔄 Reloading price prediction for:', { productName, locationState });
                           const matchedState = matchState(locationState);
                           const stateToUse = matchedState || locationState || userLocation?.state;
-                          console.log('🎯 Using state for reload:', stateToUse);
                           searchPrices(productName, stateToUse);
                         }}
                       />
@@ -901,7 +877,6 @@ export default function FarmerDashboard() {
                       </label>
                       <PhotoUpload
                         onPhotosChange={setSelectedPhotos}
-                        userId={user?.id}
                         maxPhotos={5}
                       />
                     </div>
@@ -1043,7 +1018,8 @@ export default function FarmerDashboard() {
                             </button>
                           )}
                           
-                          {/* Rating button for all order statuses */}
+                          {/* Rating button - only delivered orders can be rated */}
+                          {order.status === 'delivered' && (
                           <button 
                             onClick={() => handleRateBuyer(order)}
                             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -1054,6 +1030,7 @@ export default function FarmerDashboard() {
                           >
                             {orderRatings[order.id] ? 'Update Rating' : 'Rate Buyer'}
                           </button>
+                          )}
                           
                           {/* Contact Buyer - Functional dialer redirect */}
                           <button 
@@ -1306,7 +1283,6 @@ export default function FarmerDashboard() {
           }}
           onSave={handleSaveProduct}
           onDelete={handleDeleteProduct}
-          userId={user?.id || 0}
         />
       )}
 

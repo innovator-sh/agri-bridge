@@ -25,7 +25,6 @@ export function usePricePrediction(): UsePricePredictionResult {
 
   // Search function with debouncing
   const searchPrices = useCallback((productName: string, state?: string) => {
-    console.log('🔍 searchPrices called with:', { productName, state });
     
     // Clear previous timeout
     if (debounceTimeoutRef.current) {
@@ -54,7 +53,6 @@ export function usePricePrediction(): UsePricePredictionResult {
         setLoading(true);
         setError(null);
 
-        console.log('🚀 Making API request for:', { productName: productName.trim(), state });
 
         // Perform the search with state if provided
         const result = await marketDataService.searchCommodityPrices(
@@ -66,7 +64,6 @@ export function usePricePrediction(): UsePricePredictionResult {
         if (!abortControllerRef.current?.signal.aborted) {
           setPrediction(result);
           setLoading(false);
-          console.log('✅ Search completed:', result ? 'Data found' : 'No data');
         }
 
       } catch (err) {

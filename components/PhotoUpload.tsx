@@ -3,12 +3,25 @@
 import { useState, useRef, useEffect } from 'react';
 import { X, Camera } from 'lucide-react';
 
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+
+/** Returns a friendly error message, or null if the file is acceptable. */
+function validateImageFile(file: File): string | null {
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    return 'Only JPEG, PNG or WebP photos are allowed.';
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    return 'This photo is too large. Please use a photo smaller than 5 MB.';
+  }
+  return null;
+}
+
 interface PhotoUploadProps {
   onPhotosChange: (photos: File[]) => void;
   onUploadComplete?: (photoUrls: string[]) => void;
   maxPhotos?: number;
   existingPhotos?: string[];
-  userId?: number;
   productId?: number;
 }
 
@@ -17,7 +30,6 @@ export default function PhotoUpload({
   onUploadComplete,
   maxPhotos = 5, 
   existingPhotos = [],
-  userId,
   productId
 }: PhotoUploadProps) {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -32,8 +44,8 @@ export default function PhotoUpload({
 
   // Upload files to Supabase storage
   const uploadFiles = async (files: File[]) => {
-    if (!userId || !productId) {
-      console.error('userId and productId are required for upload');
+    if (!productId) {
+      console.error('productId is required for upload');
       return;
     }
 
@@ -42,9 +54,14 @@ export default function PhotoUpload({
 
     try {
       for (const file of files) {
+        const validationError = validateImageFile(file);
+        if (validationError) {
+          alert(`${file.name}: ${validationError}`);
+          continue;
+        }
+
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('userId', userId.toString());
         formData.append('productId', productId.toString());
 
         const response = await fetch('/api/upload-photo', {
@@ -257,6 +274,12 @@ export default function PhotoUpload({
         (file as any).locationAddress = location.address;
       }
 
+      const validationError = validateImageFile(file);
+      if (validationError) {
+        alert(validationError);
+        return;
+      }
+
       const totalFiles = selectedFiles.length + 1;
       if (totalFiles > maxPhotos) {
         alert(`You can only upload up to ${maxPhotos} photos`);
@@ -270,8 +293,8 @@ export default function PhotoUpload({
       // Close camera after capture
       closeCamera();
 
-      // Upload immediately if userId and productId are provided
-      if (userId && productId) {
+      // Upload immediately if a productId is provided
+      if (productId) {
         await uploadFiles([file]);
         alert('Photo captured and uploaded successfully!');
       } else {
@@ -488,14 +511,14 @@ export default function PhotoUpload({
               </div>
             ))}
           </div>
-          {!uploading && previews.length > 0 && userId && productId && (
+          {!uploading && previews.length > 0 && productId && (
             <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
               <p className="text-sm text-green-700 font-medium">
                 ✓ {previews.length} photo{previews.length > 1 ? 's' : ''} uploaded successfully
               </p>
             </div>
           )}
-          {!uploading && previews.length > 0 && (!userId || !productId) && (
+          {!uploading && previews.length > 0 && !productId && (
             <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
               <p className="text-sm text-yellow-700 font-medium">
                 ⏳ {previews.length} photo{previews.length > 1 ? 's' : ''} ready to upload with product

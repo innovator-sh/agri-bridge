@@ -1,158 +1,76 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from 'next/server';
+import supabase from '@/lib/supabase';
+import { route, parseJson } from '@/lib/api/handler';
+import { HttpError } from '@/lib/api/errors';
+import { requireRole, requireUser, uid } from '@/lib/auth/require';
+import { rateLimit } from '@/lib/rate-limit';
+import { createOrderSchema, ordersQuerySchema } from '@/lib/validation/orders';
 
-// GET - Fetch user's orders
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
-    const userType = searchParams.get('userType'); // 'buyer' or 'seller'
+const ORDER_SELECT = `
+  *,
+  buyer:users!orders_buyer_id_fkey (id, name, phone_number),
+  seller:users!orders_seller_id_fkey (id, name, phone_number),
+  product:products (id, name, category, photos)
+`;
 
-    if (!userId || !userType) {
-      return NextResponse.json(
-        { error: 'User ID and user type are required' },
-        { status: 400 }
-      );
-    }
+// GET - orders the session user is a party to (optionally narrowed by ?role=buyer|seller, ?status=)
+export const GET = route(async (req) => {
+  const session = await requireUser();
+  const me = uid(session);
+  const q = ordersQuerySchema.parse(Object.fromEntries(new URL(req.url).searchParams));
+  const as = q.role ?? q.userType;
 
-    const column = userType === 'buyer' ? 'buyer_id' : 'seller_id';
+  let query = supabase.from('orders').select(ORDER_SELECT, { count: 'exact' });
+  if (as === 'buyer') query = query.eq('buyer_id', me);
+  else if (as === 'seller') query = query.eq('seller_id', me);
+  else query = query.or(`buyer_id.eq.${me},seller_id.eq.${me}`);
+  if (q.status) query = query.eq('status', q.status);
 
-    const { data: orders, error } = await supabase
-      .from('orders')
-      .select(`
-        *,
-        buyer:users!orders_buyer_id_fkey (
-          id,
-          name,
-          email,
-          phone_number
-        ),
-        seller:users!orders_seller_id_fkey (
-          id,
-          name,
-          email,
-          phone_number
-        ),
-        product:products (
-          id,
-          name,
-          category,
-          photos
-        )
-      `)
-      .eq(column, parseInt(userId))
-      .order('created_at', { ascending: false });
+  const { data, count, error } = await query
+    .order('created_at', { ascending: false })
+    .range(q.offset, q.offset + q.limit - 1);
 
-    if (error) {
-      console.error('Orders fetch error:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch orders' },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      orders: orders || []
-    });
-
-  } catch (error) {
-    console.error('Orders GET API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (error) {
+    console.error('[orders] fetch failed', error);
+    throw new HttpError(500, 'Failed to fetch orders');
   }
-}
 
-// POST - Create new order
-export async function POST(request: NextRequest) {
-  try {
-    const {
-      buyerId,
-      sellerId,
-      productId,
-      quantity,
-      unitPrice,
-      totalPrice,
-      deliveryAddress,
-      notes
-    } = await request.json();
+  return NextResponse.json({
+    orders: data ?? [],
+    total: count ?? 0,
+    limit: q.limit,
+    offset: q.offset,
+  });
+});
 
-    if (!buyerId || !sellerId || !productId || !quantity || !unitPrice || !totalPrice) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
-    }
+const PLACE_ORDER_ERRORS: Record<string, HttpError> = {
+  insufficient_stock: new HttpError(409, 'Insufficient stock'),
+  product_not_found: new HttpError(404, 'Product not found'),
+  product_unavailable: new HttpError(409, 'Product is not available'),
+  own_product: new HttpError(403, 'You cannot order your own product'),
+};
 
-    // Check if product has enough stock
-    const { data: product, error: productError } = await supabase
-      .from('products')
-      .select('quantity')
-      .eq('id', productId)
-      .single();
+// POST - place an order. Buyer, seller, prices and totals are all derived server-side.
+export const POST = route(async (req) => {
+  const session = await requireRole('buyer');
+  const me = uid(session);
+  rateLimit(`orders:${me}`, 30, 60_000);
+  const body = await parseJson(req, createOrderSchema);
 
-    if (productError || !product) {
-      return NextResponse.json(
-        { error: 'Product not found' },
-        { status: 404 }
-      );
-    }
+  const { data, error } = await supabase.rpc('place_order', {
+    p_buyer_id: me,
+    p_product_id: body.productId,
+    p_quantity: body.quantity,
+    p_delivery_address: body.deliveryAddress || null,
+    p_notes: body.notes || null,
+  } as never);
 
-    if (product.quantity < quantity) {
-      return NextResponse.json(
-        { error: 'Insufficient stock' },
-        { status: 400 }
-      );
-    }
-
-    // Create order
-    const { data: order, error: orderError } = await supabase
-      .from('orders')
-      .insert({
-        buyer_id: buyerId,
-        seller_id: sellerId,
-        product_id: productId,
-        quantity,
-        unit_price: unitPrice,
-        total_price: totalPrice,
-        delivery_address: deliveryAddress,
-        notes,
-        status: 'pending'
-      })
-      .select()
-      .single();
-
-    if (orderError) {
-      console.error('Order creation error:', orderError);
-      return NextResponse.json(
-        { error: 'Failed to create order' },
-        { status: 500 }
-      );
-    }
-
-    // Update product quantity
-    const { error: updateError } = await supabase
-      .from('products')
-      .update({ quantity: product.quantity - quantity })
-      .eq('id', productId);
-
-    if (updateError) {
-      console.error('Product update error:', updateError);
-      // Note: In a real app, you'd want to rollback the order creation here
-    }
-
-    return NextResponse.json({
-      success: true,
-      order,
-      message: 'Order created successfully'
-    });
-
-  } catch (error) {
-    console.error('Orders POST API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+  if (error) {
+    const known = Object.keys(PLACE_ORDER_ERRORS).find((k) => error.message?.includes(k));
+    if (known) throw PLACE_ORDER_ERRORS[known];
+    console.error('[orders] place_order failed', error);
+    throw new HttpError(500, 'Failed to create order');
   }
-}
+
+  return NextResponse.json({ success: true, order: data, message: 'Order created successfully' });
+});

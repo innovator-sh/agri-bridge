@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { X, Save, Trash2, ImageIcon, Plus, Tag, Calculator, MapPin } from 'lucide-react';
 import PhotoUpload from './PhotoUpload';
-import { supabaseClient } from '@/lib/supabase';
 
 interface Product {
   id: number;
@@ -26,7 +25,6 @@ interface EditProductProps {
   onClose: () => void;
   onSave: (updatedProduct: Product) => void;
   onDelete: (productId: number) => void;
-  userId: number;
 }
 
 export default function EditProduct({ 
@@ -34,8 +32,7 @@ export default function EditProduct({
   isOpen, 
   onClose, 
   onSave, 
-  onDelete, 
-  userId 
+  onDelete
 }: EditProductProps) {
   const [formData, setFormData] = useState({
     name: product.name,
@@ -82,20 +79,22 @@ export default function EditProduct({
     }));
   };
 
+  // Removes the object from storage and from the product's photos (server-side)
+  const requestPhotoDelete = async (photoUrl: string) => {
+    const response = await fetch('/api/delete-photo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: product.id, url: photoUrl })
+    });
+    return response.ok;
+  };
+
   const handleDeletePhoto = async (photoUrl: string, index: number) => {
     try {
-      // Extract file path from URL
-      const urlParts = photoUrl.split('/');
-      const fileName = urlParts[urlParts.length - 1];
-      const filePath = `${userId}/${product.id}/${fileName}`;
-
-      // Delete from Supabase Storage
-      const { error } = await supabaseClient.storage
-        .from('Products')
-        .remove([filePath]);
-
-      if (error) {
-        console.error('Error deleting photo:', error);
+      const ok = await requestPhotoDelete(photoUrl);
+      if (!ok) {
+        alert('Failed to delete photo. Please try again.');
+        return;
       }
 
       // Remove from local state
@@ -103,6 +102,7 @@ export default function EditProduct({
       setPhotos(updatedPhotos);
     } catch (error) {
       console.error('Error deleting photo:', error);
+      alert('Failed to delete photo. Please try again.');
     }
   };
 
@@ -114,13 +114,8 @@ export default function EditProduct({
   const handleSave = async () => {
     setSaving(true);
     try {
-      console.log('Product object:', product);
-      console.log('Product ID:', product.id);
-      console.log('Product ID type:', typeof product.id);
-      console.log('Update data:', { ...formData, photos });
       
       const url = `/api/products/${product.id}`;
-      console.log('Request URL:', url);
       
       const response = await fetch(url, {
         method: 'PUT',
@@ -131,9 +126,7 @@ export default function EditProduct({
         })
       });
 
-      console.log('Response status:', response.status);
       const result = await response.json();
-      console.log('Response data:', result);
 
       if (response.ok && result.success) {
         // Add seller info back to the product for display
@@ -159,39 +152,24 @@ export default function EditProduct({
   const handleDelete = async () => {
     setSaving(true);
     try {
-      console.log('Delete - Product object:', product);
-      console.log('Delete - Product ID:', product.id);
-      console.log('Delete - Product ID type:', typeof product.id);
       
-      // Delete all photos from storage first
-      if (photos.length > 0) {
-        console.log('Deleting photos from storage...');
-        const filePaths = photos.map(photoUrl => {
-          const urlParts = photoUrl.split('/');
-          const fileName = urlParts[urlParts.length - 1];
-          return `${userId}/${product.id}/${fileName}`;
-        });
-
-        const { error: storageError } = await supabaseClient.storage
-          .from('Products')
-          .remove(filePaths);
-
-        if (storageError) {
-          console.error('Error deleting photos from storage:', storageError);
+      // Delete all photos from storage first (best effort; the server also cleans up)
+      for (const photoUrl of photos) {
+        try {
+          await requestPhotoDelete(photoUrl);
+        } catch (error) {
+          console.error('Error deleting photo from storage:', error);
         }
       }
 
       // Delete product from database
       const url = `/api/products/${product.id}`;
-      console.log('Delete request URL:', url);
       
       const response = await fetch(url, {
         method: 'DELETE'
       });
 
-      console.log('Delete response status:', response.status);
       const result = await response.json();
-      console.log('Delete response data:', result);
 
       if (response.ok && result.success) {
         onDelete(product.id);
@@ -386,7 +364,6 @@ export default function EditProduct({
             <PhotoUpload
               onPhotosChange={setSelectedFiles}
               onUploadComplete={handlePhotosUploaded}
-              userId={userId}
               productId={product.id}
               maxPhotos={5 - photos.length}
             />

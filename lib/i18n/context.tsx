@@ -30,15 +30,23 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
 
   // Load locale from localStorage on mount
   useEffect(() => {
-    const savedLocale = localStorage.getItem('locale') as Locale;
-    if (savedLocale && ['en', 'hi', 'mr', 'te'].includes(savedLocale)) {
-      setLocale(savedLocale);
+    try {
+      const savedLocale = localStorage.getItem('locale') as Locale;
+      if (savedLocale && ['en', 'hi', 'mr', 'te'].includes(savedLocale)) {
+        setLocale(savedLocale);
+      }
+    } catch {
+      // Storage unavailable (private mode, blocked): fall back to default locale
     }
   }, []);
 
   // Save locale to localStorage when it changes
   useEffect(() => {
-    localStorage.setItem('locale', locale);
+    try {
+      localStorage.setItem('locale', locale);
+    } catch {
+      // Ignore storage failures
+    }
     document.documentElement.lang = locale;
   }, [locale]);
 
