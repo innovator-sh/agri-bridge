@@ -4,31 +4,35 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.93.3",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/pg": "^8.16.0",
+    "@serwist/next": "^9.5.13",
+    "@supabase/supabase-js": "^2.117.3",
     "bcryptjs": "^3.0.3",
+    "jose": "^6.2.12",
     "lucide-react": "^0.563.0",
-    "next": "16.1.6",
-    "next-pwa": "^5.6.0",
-    "pg": "^8.18.0",
-    "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "next": "^16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "server-only": "^0.0.1",
+    "zod": "^4.6.6"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/next-pwa": "^5.6.9",
-    "@types/node": "^20",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22.20.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.1.6",
-    "tailwindcss": "^4",
+    "eslint-config-next": "^16.4.0",
+    "serwist": "^9.5.13",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
