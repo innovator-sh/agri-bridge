@@ -1,36 +1,128 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AgriBridge
 
-## Getting Started
+A marketplace that connects farmers (sellers) directly with buyers. Farmers list produce with
+photos and prices; buyers browse, order, rate sellers, and post standing requests that farmers
+can apply to.
 
-First, run the development server:
+## Features at a glance
+
+- Farmer and buyer accounts with role-based dashboards
+- Product listings with photo upload, search by category, bulk and single pricing
+- Cart and direct orders with a status flow (pending, confirmed, shipped, delivered, cancelled)
+- Two-way ratings and reviews tied to orders
+- Order requests: buyers post what they need, farmers apply with a price and quantity
+- Recurring order schedules processed by a daily cron job
+- Weather, market prices, government schemes and an AI chatbot (optional integrations)
+- Multi-language interface (`messages/*.json`) and an installable PWA
+
+## Stack
+
+- Next.js 16 (App Router, Turbopack) and React 19
+- Supabase: Postgres and Storage, accessed server-side only with the service-role key
+- Tailwind CSS 4
+- zod for validation, jose and bcryptjs for sessions and password hashing
+- Serwist for the service worker
+
+## Quick start
+
+Prerequisites: Node 22 (see `.nvmrc`), npm, and a Supabase project.
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local
+# generate a session secret (at least 32 characters) and paste it into .env.local
+openssl rand -base64 48
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+1. Fill in `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `SESSION_SECRET` in
+   `.env.local`.
+2. Apply the database migrations in `sql/` in numeric order (`0001` to `0004`) using the
+   Supabase SQL editor or the CLI. See [`sql/README.md`](sql/README.md).
+3. Install and run:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm ci
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open http://localhost:3000. Optionally seed a development database with sample accounts
+(random passwords are printed once):
 
-## Learn More
+```bash
+ALLOW_SEED=1 SEED_CONFIRM_URL="<your NEXT_PUBLIC_SUPABASE_URL>" \
+  node --env-file=.env.local scripts/seed-dev.mjs
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Environment variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Purpose | Required |
+| --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL | Yes |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side database and storage access (never exposed to the browser) | Yes |
+| `SESSION_SECRET` | Signs the session cookie, at least 32 characters | Yes |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Not used for data access | No |
+| `CRON_SECRET` | Authorises `/api/process-schedules` (at least 16 characters) | Required for scheduled orders |
+| `GROQ_API_KEY` | Chatbot and image quality analysis | No |
+| `OPENWEATHER_API_KEY` | Weather data | No |
+| `MARKET_DATA_API_KEY`, `MARKET_DATA_API_URL` | Market price data | No |
+| `ML_API_URL` | Price prediction service | No |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Reserved for shared rate limiting | No |
+| `ALLOW_SEED`, `SEED_CONFIRM_URL` | Safety flags for `scripts/seed-dev.mjs` only | No |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Security model
 
-## Deploy on Vercel
+- The browser never talks to Supabase. Every data access goes through an API route using the
+  service-role key.
+- Identity comes only from a signed httpOnly session cookie. Routes authenticate, authorise
+  (role and ownership) and validate input before touching the database.
+- Row Level Security is enabled on all tables with no policies, and privileges are revoked
+  from `anon` and `authenticated`, so the database is unreachable except through the API.
+- Product photos are public by URL; uploads and deletes are server-side only.
+- Sensitive routes are rate limited and errors never leak database details.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+See [`SECURITY.md`](SECURITY.md) for details and how to report a vulnerability.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Scripts
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start the development server |
+| `npm run build` | Production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | TypeScript check (`tsc --noEmit`) |
+| `node scripts/seed-dev.mjs` | Dev-only seed data (guarded, see above) |
+
+## Project layout
+
+```
+app/            Routes, pages and API handlers (app/api/**/route.ts)
+components/     React components
+lib/            Server and shared code: auth, env, supabase client, validation, services
+messages/       Translation files
+public/         Static assets and PWA manifest
+sql/            Numbered database migrations (sql/legacy is reference only, do not apply)
+scripts/        Developer scripts
+proxy.ts        Request gate for /dashboard and /api
+```
+
+## CI and security automation
+
+- **CI** (`.github/workflows/ci.yml`): `npm ci`, lint, typecheck and build on every push to
+  `main` and every pull request, with dummy environment values.
+- **Security** (`.github/workflows/security.yml`): gitleaks over full history, `npm audit`,
+  dependency review on pull requests and CodeQL, on push, pull request and weekly.
+- **Dependabot**: weekly grouped updates for npm and GitHub Actions. Major versions of
+  react, react-dom, next, typescript and eslint are reviewed manually.
+- All third-party actions are pinned to full commit SHAs.
+
+## Deployment notes
+
+Designed for Vercel.
+
+1. Set the required environment variables in the project settings (use production values;
+   never reuse development keys).
+2. Apply the `sql/` migrations to the production Supabase project.
+3. `vercel.json` registers a daily cron for `/api/process-schedules`. Set `CRON_SECRET` in the
+   Vercel project; Vercel Cron sends it as `Authorization: Bearer <CRON_SECRET>` and the route
+   rejects requests without it.
+4. Rotate keys if they are ever exposed (see `sql/README.md`).

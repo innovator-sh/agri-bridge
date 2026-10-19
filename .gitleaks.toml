@@ -1,0 +1,11 @@
+# gitleaks configuration: the default ruleset plus a narrow allowlist.
+title = "Project gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholder values in the example environment file"
+paths = [
+  '''^\.env\.example$''',
+]
