@@ -126,3 +126,7 @@ Designed for Vercel.
    Vercel project; Vercel Cron sends it as `Authorization: Bearer <CRON_SECRET>` and the route
    rejects requests without it.
 4. Rotate keys if they are ever exposed (see `sql/README.md`).
+
+## License
+
+Released under the [MIT License](LICENSE).
