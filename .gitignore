@@ -63,6 +63,7 @@ next-env.d.ts
 !/README.md
 !/CLAUDE.md
 !/SECURITY.md
+!/testing.md
 
 # logs
 *.log
