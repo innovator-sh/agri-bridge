@@ -473,7 +473,7 @@ non-noreply author email. Check them without committing:
 git config user.email                                  # must end with @users.noreply.github.com
 gitleaks protect --staged --redact --no-banner         # scan only what is staged
 git log --format='%an <%ae>' | sort | uniq -c          # only the noreply identity should appear
-git log --format=%B | grep -iE 'co-authored|claude|session' || echo clean
+git log --format='%h %s%n%b' | less                     # eyeball messages: one-line subject, details, no trailers
 git ls-files | grep -E '\.env($|\.local)|\.pem$|\.key$' || echo "no secrets tracked"
 ```
 
