@@ -51,6 +51,7 @@ Dummy values that are enough for build and the no-database smoke test (section 4
 export NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co
 export SUPABASE_SERVICE_ROLE_KEY=dummy-service-role-key-for-ci-0000
 export SESSION_SECRET=ci-only-secret-value-at-least-32-characters-long
+export ALLOW_PLACEHOLDER_SECRETS=1   # production builds refuse placeholder secrets unless this is set
 ```
 
 ```powershell
@@ -58,6 +59,7 @@ export SESSION_SECRET=ci-only-secret-value-at-least-32-characters-long
 $env:NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co"
 $env:SUPABASE_SERVICE_ROLE_KEY = "dummy-service-role-key-for-ci-0000"
 $env:SESSION_SECRET = "ci-only-secret-value-at-least-32-characters-long"
+$env:ALLOW_PLACEHOLDER_SECRETS = "1"
 ```
 
 ## 2. Static checks
@@ -135,6 +137,24 @@ curl -sI "$B/api/placeholder/300/200" | grep -i 'content-security-policy'     # 
 curl -sI $B/login | grep -iE 'strict-transport|x-frame|x-content-type|content-security|referrer-policy|permissions-policy'
 curl -sI $B/login | grep -i 'x-powered-by'                                    # -> (nothing)
 ```
+
+### Placeholder-secret guard
+
+A production build refuses well-known placeholder secrets (such as the dummy values
+above), so a copied example can never sign real logins. `ALLOW_PLACEHOLDER_SECRETS=1`
+is the only way to opt in, and it exists for local testing only. Never set it on a real
+deployment. To prove the guard works, restart the production server **without** the flag:
+
+```bash
+unset ALLOW_PLACEHOLDER_SECRETS && npm run start         # dummy SESSION_SECRET still exported
+curl -s -w ' %{http_code}\n' -X POST -H 'content-type: application/json' \
+  -d '{"identifier":"a@example.test","password":"x"}' $B/api/auth/login      # -> 500 (server refuses the secret; see terminal log)
+BUYER=$(token 7 buyer)                                                        # token helper from the next block
+curl -s -w ' %{http_code}\n' -H "Cookie: ab_session=$BUYER" $B/api/cart      # -> 401 (cookie signed with a placeholder is rejected)
+```
+
+The terminal shows `Invalid or missing environment variables: SESSION_SECRET`. With a real
+secret from `openssl rand -base64 48` the same requests behave normally.
 
 ### Signed-token tests (role enforcement, no database needed)
 

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
+import { secretIsUsable } from '@/lib/secrets';
 
 const PUBLIC_API = [
   '/api/auth/login',
@@ -10,7 +11,7 @@ const PUBLIC_API = [
 ];
 
 async function valid(token?: string) {
-  if (!token || !process.env.SESSION_SECRET) return false;
+  if (!token || !secretIsUsable(process.env.SESSION_SECRET)) return false;
   try {
     await jwtVerify(token, new TextEncoder().encode(process.env.SESSION_SECRET), { algorithms: ['HS256'] });
     return true;

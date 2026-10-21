@@ -1,5 +1,6 @@
 import 'server-only';
 import { z } from 'zod';
+import { isPlaceholderSecret, placeholderSecretsRefused } from '@/lib/secrets';
 
 const schema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
@@ -13,6 +14,13 @@ const schema = z.object({
   ML_API_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
+}).superRefine((v, ctx) => {
+  if (!placeholderSecretsRefused()) return;
+  for (const key of ['SESSION_SECRET', 'CRON_SECRET'] as const) {
+    if (isPlaceholderSecret(v[key])) {
+      ctx.addIssue({ code: 'custom', path: [key], message: 'looks like a placeholder; generate a real secret' });
+    }
+  }
 });
 
 let cached: z.infer<typeof schema> | undefined;
