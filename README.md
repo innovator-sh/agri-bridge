@@ -127,6 +127,20 @@ Designed for Vercel.
    rejects requests without it.
 4. Rotate keys if they are ever exposed (see `sql/README.md`).
 
+## Known limitations
+
+- **Image quality analysis needs an external ML service.** The product-photo quality check
+  calls a separately hosted model (`ML_API_URL`). The model and its server are not part of
+  this repository. Without it the route returns "Quality analysis is not configured" and the
+  rest of the app works normally.
+- **Payments are simulated.** Checkout creates orders and decrements stock, but no payment
+  gateway is integrated and no money moves. Do not use it to take real payments as is.
+- **Rate limiting is per server instance.** Limits are held in memory and reset on restart.
+  Multi-instance deployments need a shared store such as Redis.
+- **Third-party features need their own keys.** Weather, market prices, the assistant and
+  the schemes list each use an external API and degrade or return "not configured" without
+  one (see the environment variables above).
+
 ## License
 
 Released under the [MIT License](LICENSE).
