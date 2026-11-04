@@ -130,3 +130,12 @@ Designed for Vercel.
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Contributors
+
+| Contributor | GitHub |
+| --- | --- |
+| innovator-sh | [github.com/innovator-sh](https://github.com/innovator-sh) |
+| Dhruv | [github.com/Dhruv-Bhagchandani](https://github.com/Dhruv-Bhagchandani) |
+| Swayam | [github.com/swayamkambli14](https://github.com/swayamkambli14) |
+| seudoe | [github.com/seudoe](https://github.com/seudoe) |
