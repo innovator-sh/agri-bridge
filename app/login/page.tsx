@@ -435,16 +435,6 @@ export default function LoginPage() {
                         </button>
                     </p>
                 </div>
-
-                {/* Demo Note - Styled */}
-                <div className="mt-6 pt-4 border-t border-gray-100 text-center">
-                    <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1">{t('auth.demoCredentials')}</p>
-                    <div className="flex flex-col space-y-1 text-[10px] text-gray-500">
-                        <span>{t('auth.farmer')}: <span className="font-mono bg-gray-100 px-1 rounded">rajesh.farmer@agribridge.com</span> / <span className="font-mono bg-gray-100 px-1 rounded">farmer123</span></span>
-                        <span>{t('auth.buyer')}: <span className="font-mono bg-gray-100 px-1 rounded">amit.buyer@agribridge.com</span> / <span className="font-mono bg-gray-100 px-1 rounded">buyer123</span></span>
-                    </div>
-                </div>
-
              </div>
         </div>
 
