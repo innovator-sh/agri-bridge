@@ -348,7 +348,7 @@ export default function BuyerDashboard() {
         alert(`${quantity}kg added to cart!`);
         setSelectedQuantity(prev => ({ ...prev, [productId]: 1 })); // Reset quantity
       } else {
-        alert(result.message || 'Failed to add to cart');
+        alert(result.error || result.message || 'Failed to add to cart');
       }
     } catch (error) {
       console.error('Error adding to cart:', error);
@@ -369,12 +369,15 @@ export default function BuyerDashboard() {
         })
       });
 
-      const result = await response.json();
-      if (result.success) {
-        fetchCart(); // Refresh cart
+      const result = await response.json().catch(() => ({}));
+      if (!result.success) {
+        // e.g. more than the available stock: tell the buyer why and snap back to the saved quantity
+        alert(result.error || 'Could not update the quantity');
       }
+      fetchCart(); // Refresh cart (also resets the input after a rejected change)
     } catch (error) {
       console.error('Error updating cart:', error);
+      alert('Could not update the quantity. Please try again.');
     }
   };
 
@@ -1064,6 +1067,11 @@ export default function BuyerDashboard() {
                           <p className="text-sm font-medium text-blue-600">
                             You have {product.cart_quantity}kg in cart
                           </p>
+                          {product.cart_quantity > product.quantity && (
+                            <p className="text-sm font-medium text-red-600" role="alert">
+                              Only {product.quantity}kg available. Reduce the quantity to check out.
+                            </p>
+                          )}
                         </div>
                         
                         <div className="text-right">
@@ -1123,9 +1131,10 @@ export default function BuyerDashboard() {
                           sum + ((item.cart_quantity >= 10 ? item.price_multiple : item.price_single) * item.cart_quantity), 0
                         )}</span>
                       </div>
-                      <button 
+                      <button
                         onClick={() => setShowPaymentPortal(true)}
-                        className="w-full bg-green-600 text-white py-3 px-6 rounded-xl hover:bg-green-700 transition-colors font-medium"
+                        disabled={cartItems.some(item => item.cart_quantity > item.quantity)}
+                        className="w-full bg-green-600 text-white py-3 px-6 rounded-xl hover:bg-green-700 transition-colors font-medium disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed"
                       >
                         Proceed to Checkout
                       </button>

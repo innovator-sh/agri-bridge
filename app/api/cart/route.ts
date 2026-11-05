@@ -26,6 +26,24 @@ async function loadItems(userId: number): Promise<CartRow[]> {
   return (data ?? []) as unknown as CartRow[];
 }
 
+/** Rejects a cart quantity above the product's current stock, with the available amount in the message. */
+async function assertWithinStock(productId: number, wanted: number) {
+  const { data, error } = await supabase
+    .from('products')
+    .select('quantity, status')
+    .eq('id', productId)
+    .maybeSingle();
+  if (error) {
+    console.error('[cart] stock check failed', error);
+    throw new HttpError(500, 'Failed to update cart');
+  }
+  const product = data as { quantity: number; status: string } | null;
+  if (!product || product.status !== 'active') throw notFound('Product');
+  if (wanted > product.quantity) {
+    throw new HttpError(409, `Only ${product.quantity} kg available. Your cart would have ${wanted} kg.`);
+  }
+}
+
 // GET - the session user's cart with product details
 export const GET = route(async (req) => {
   const me = uid(await requireRole('buyer'));
@@ -77,6 +95,14 @@ export const POST = route(async (req) => {
   const me = uid(await requireRole('buyer'));
   const { productId, quantity } = await parseJson(req, cartAddSchema);
 
+  const { data: existing } = await supabase
+    .from('cart_items')
+    .select('quantity')
+    .eq('user_id', me)
+    .eq('product_id', productId)
+    .maybeSingle();
+  await assertWithinStock(productId, quantity + ((existing as { quantity: number } | null)?.quantity ?? 0));
+
   const { error } = await supabase.rpc('cart_add', {
     p_user_id: me,
     p_product_id: productId,
@@ -107,6 +133,7 @@ export const PUT = route(async (req) => {
       throw new HttpError(500, 'Failed to update cart');
     }
   } else {
+    await assertWithinStock(productId, quantity);
     const { data, error } = await supabase
       .from('cart_items')
       .update({ quantity } as never)
