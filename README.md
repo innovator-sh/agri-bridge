@@ -65,6 +65,7 @@ ALLOW_SEED=1 SEED_CONFIRM_URL="<your NEXT_PUBLIC_SUPABASE_URL>" \
 | `OPENWEATHER_API_KEY` | Weather data | No |
 | `MARKET_DATA_API_KEY`, `MARKET_DATA_API_URL` | Market price data | No |
 | `ML_API_URL` | Price prediction service | No |
+| `NEXT_PUBLIC_DEMO_{FARMER,BUYER}_{EMAIL,PASSWORD}` | Shared demo logins shown on the login page. Public by design, so throwaway accounts only | No |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Reserved for shared rate limiting | No |
 | `ALLOW_SEED`, `SEED_CONFIRM_URL` | Safety flags for `scripts/seed-dev.mjs` only | No |
 

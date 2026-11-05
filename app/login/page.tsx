@@ -6,6 +6,20 @@ import { useI18n } from '@/lib/i18n/context';
 import { Sprout, Wheat, ShoppingCart, Eye, EyeOff, CloudSun, Leaf, Store, ChevronRight, Wind, Droplets, Thermometer } from 'lucide-react';
 import LanguageSwitcher from '@/components/LanguageSwitcher';
 
+// Optional shared demo logins. Set at build time (see .env.example); nothing is hardcoded in the repo.
+const DEMO_ACCOUNTS = [
+  {
+    key: 'demoFarmer',
+    identifier: process.env.NEXT_PUBLIC_DEMO_FARMER_EMAIL,
+    password: process.env.NEXT_PUBLIC_DEMO_FARMER_PASSWORD,
+  },
+  {
+    key: 'demoBuyer',
+    identifier: process.env.NEXT_PUBLIC_DEMO_BUYER_EMAIL,
+    password: process.env.NEXT_PUBLIC_DEMO_BUYER_PASSWORD,
+  },
+].filter((a): a is { key: string; identifier: string; password: string } => !!a.identifier && !!a.password);
+
 export default function LoginPage() {
   const { t } = useI18n();
   const [isLogin, setIsLogin] = useState(true);
@@ -420,6 +434,30 @@ export default function LoginPage() {
                         )}
                     </button>
                 </form>
+
+                {isLogin && DEMO_ACCOUNTS.length > 0 && (
+                    <div className="mt-5 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-3">
+                        <p className="text-xs font-semibold text-gray-700">{t('auth.demoAccounts')}</p>
+                        <p className="mt-0.5 text-[11px] text-gray-500">{t('auth.demoHint')}</p>
+                        <div className="mt-2 space-y-2">
+                            {DEMO_ACCOUNTS.map((a) => (
+                                <button
+                                    key={a.key}
+                                    type="button"
+                                    onClick={() => {
+                                        setFormData((f) => ({ ...f, identifier: a.identifier, password: a.password }));
+                                        setError('');
+                                    }}
+                                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs hover:border-gray-400 transition-colors"
+                                >
+                                    <span className="font-semibold text-gray-800">{t(`auth.${a.key}`)}</span>
+                                    <span className="block text-gray-500 break-all">{a.identifier}</span>
+                                    <span className="block font-mono text-gray-500 break-all">{a.password}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
                 <div className="mt-6 text-center">
                     <p className="text-xs text-gray-600">
